@@ -48,3 +48,6 @@
 # typescript
 *.tsbuildinfo
 **/next-env.d.ts
+
+# CallTree runtime data (SQLite db + recordings)
+CallTree.Core/CallTree.Api/data/

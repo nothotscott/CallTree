@@ -1,3 +1,8 @@
 <Solution>
-  <Project Path="CallTree.Core.csproj" />
+  <Project Path="CallTree.Domain/CallTree.Domain.csproj" />
+  <Project Path="CallTree.Application/CallTree.Application.csproj" />
+  <Project Path="CallTree.Infrastructure/CallTree.Infrastructure.csproj" />
+  <Project Path="CallTree.Telephony/CallTree.Telephony.csproj" />
+  <Project Path="CallTree.Api/CallTree.Api.csproj" />
+  <Project Path="CallTree.Tests/CallTree.Tests.csproj" />
 </Solution>
