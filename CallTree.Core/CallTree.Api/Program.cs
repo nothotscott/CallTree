@@ -1,3 +1,4 @@
+using CallTree.Application;
 using CallTree.Infrastructure;
 using CallTree.Infrastructure.Persistence;
 using CallTree.Telephony;
@@ -17,6 +18,7 @@ namespace CallTree.Api
             builder.Services.AddOpenApi();
             builder.Services.AddHealthChecks();
 
+            builder.Services.AddApplication();
             builder.Services.AddInfrastructure(builder.Configuration);
             builder.Services.AddTelephony(builder.Configuration);
 
