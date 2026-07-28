@@ -10,6 +10,7 @@ using Microsoft.Extensions.Options;
 using SIPSorcery.Media;
 using SIPSorcery.SIP;
 using SIPSorcery.SIP.App;
+using SIPSorcery.Sys;
 using SIPSorceryMedia.Abstractions;
 
 namespace CallTree.Telephony;
@@ -31,6 +32,8 @@ public class TelephonyBackgroundService(
     private SIPTransport? _sipTransport;
     private SIPRegistrationUserAgent? _registrationUserAgent;
     private PhoneNumber? _myCellNumber;
+    private IPAddress? _publicAddress;
+    private PortRange? _rtpPortRange;
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
@@ -55,9 +58,34 @@ public class TelephonyBackgroundService(
         // Route SIPSorcery's internal logging through the host's logging pipeline.
         SIPSorcery.LogFactory.Set(loggerFactory);
 
+        _rtpPortRange = new PortRange(telephony.RtpPortStart, telephony.RtpPortEnd);
+
         _sipTransport = new SIPTransport();
         _sipTransport.AddSIPChannel(new SIPUDPChannel(new IPEndPoint(IPAddress.Any, telephony.SipListenPort)));
+
+        // Registration and everything else goes out over UDP, but a trunk configured to deliver inbound
+        // calls over TCP would otherwise reach a closed port with no trace of the attempt on our side.
+        if (telephony.ListenOnTcp)
+        {
+            _sipTransport.AddSIPChannel(new SIPTCPChannel(new IPEndPoint(IPAddress.Any, telephony.SipListenPort)));
+        }
+
         _sipTransport.SIPTransportRequestReceived += OnTransportRequestReceived;
+
+        ConfigurePublicAddress(telephony);
+
+        if (telephony.TraceSip)
+        {
+            EnableSipTracing();
+        }
+
+        _logger.LogInformation(
+            "SIP listening on {Channels}; advertising {ContactHost} in Contact/SDP; RTP {RtpStart}-{RtpEnd}; SIP trace {TraceState}",
+            string.Join(", ", _sipTransport.GetSIPChannels().Select(c => c.ListeningSIPEndPoint.ToString())),
+            _sipTransport.ContactHost is { Length: > 0 } host ? host : "(local address — NAT will break inbound calls)",
+            telephony.RtpPortStart,
+            telephony.RtpPortEnd,
+            telephony.TraceSip ? "on" : "off");
 
         // A persistent UA fields incoming INVITEs; per-leg UAs come with bridging in Phase 4.
         var listenerUserAgent = new SIPUserAgent(_sipTransport, null);
@@ -82,9 +110,78 @@ public class TelephonyBackgroundService(
         }
     }
 
+    /// <summary>
+    /// Points the Contact URI (and the SDP connection address) at our public address instead of the LAN
+    /// address SIPSorcery would otherwise substitute in. A hostname is passed through to Contact verbatim
+    /// but must be resolved for SDP, which carries a bare IP.
+    /// </summary>
+    private void ConfigurePublicAddress(TelephonyOptions telephony)
+    {
+        if (telephony.PublicHost.Length == 0)
+        {
+            _logger.LogWarning(
+                "Telephony:PublicHost is not set. Behind NAT the trunk will be told to reach us at a LAN address "
+                + "and inbound calls will fail without ever reaching this process.");
+            return;
+        }
+
+        _sipTransport!.ContactHost = telephony.PublicHost;
+
+        if (IPAddress.TryParse(telephony.PublicHost, out var parsed))
+        {
+            _publicAddress = parsed;
+            return;
+        }
+
+        try
+        {
+            _publicAddress = Dns.GetHostAddresses(telephony.PublicHost)
+                .FirstOrDefault(a => a.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Could not resolve Telephony:PublicHost '{PublicHost}' for use in SDP.", telephony.PublicHost);
+        }
+
+        if (_publicAddress is null)
+        {
+            _logger.LogWarning("Telephony:PublicHost '{PublicHost}' did not resolve to an IPv4 address; SDP will advertise the LAN address.", telephony.PublicHost);
+        }
+    }
+
+    /// <summary>Logs whole SIP messages on the wire — the only reliable way to see NAT/routing problems.</summary>
+    private void EnableSipTracing()
+    {
+        var trace = loggerFactory.CreateLogger("CallTree.Telephony.SipTrace");
+
+        _sipTransport!.SIPRequestOutTraceEvent += (local, remote, request) =>
+            trace.LogTrace("SIP TX {Local} -> {Remote}\n{Message}", local, remote, request.ToString());
+        _sipTransport.SIPRequestInTraceEvent += (local, remote, request) =>
+            trace.LogTrace("SIP RX {Remote} -> {Local}\n{Message}", remote, local, request.ToString());
+        _sipTransport.SIPResponseOutTraceEvent += (local, remote, response) =>
+            trace.LogTrace("SIP TX {Local} -> {Remote}\n{Message}", local, remote, response.ToString());
+        _sipTransport.SIPResponseInTraceEvent += (local, remote, response) =>
+            trace.LogTrace("SIP RX {Remote} -> {Local}\n{Message}", remote, local, response.ToString());
+        _sipTransport.SIPBadRequestInTraceEvent += (local, remote, message, field, raw) =>
+            trace.LogWarning("SIP RX (bad request) {Remote} -> {Local}: {Message} [{Field}]\n{Raw}", remote, local, message, field, raw);
+        _sipTransport.SIPBadResponseInTraceEvent += (local, remote, message, field, raw) =>
+            trace.LogWarning("SIP RX (bad response) {Remote} -> {Local}: {Message} [{Field}]\n{Raw}", remote, local, message, field, raw);
+    }
+
     private void StartRegistration(TrunkOptions trunk)
     {
         var server = trunk.Port == 5060 ? trunk.Host : $"{trunk.Host}:{trunk.Port}";
+
+        // Honouring a separate auth username needs the long SIPRegistrationUserAgent overload (AOR, realm,
+        // contact URI and custom headers all become our responsibility). No provider in use needs it yet,
+        // so fail loudly rather than let the setting look like it took effect.
+        if (!string.IsNullOrWhiteSpace(trunk.AuthUsername) && trunk.AuthUsername != trunk.Username)
+        {
+            _logger.LogWarning(
+                "Trunk:AuthUsername ('{AuthUsername}') is set but not supported yet — registering as '{Username}' instead.",
+                trunk.AuthUsername,
+                trunk.Username);
+        }
 
         _registrationUserAgent = new SIPRegistrationUserAgent(
             _sipTransport,
@@ -92,7 +189,11 @@ public class TelephonyBackgroundService(
             trunk.Password,
             server,
             trunk.RegistrationExpirySeconds,
-            exitOnUnequivocalFailure: false);
+            exitOnUnequivocalFailure: false,
+            // SIPSorcery defaults this off, producing "Contact: <sip:host:port>" with no user part.
+            // Telnyx accepts the REGISTER (digest auth is valid) but cannot tie the binding to a
+            // connection, so its registration status stays empty and inbound calls have no destination.
+            sendUsernameInContactHeader: true);
 
         _registrationUserAgent.RegistrationSuccessful += (uri, _) =>
             _logger.LogInformation("SIP registration successful for {Uri}", uri);
@@ -168,7 +269,7 @@ public class TelephonyBackgroundService(
             var serverUserAgent = userAgent.AcceptCall(request);
             var mediaSession = CreateSilenceMediaSession();
 
-            var answered = await userAgent.Answer(serverUserAgent, mediaSession, null);
+            var answered = await userAgent.Answer(serverUserAgent, mediaSession, publicIpAddress: _publicAddress);
             if (!answered)
             {
                 await RecordEndOnceAsync(HangupInitiator.Remote, "not answered (cancelled or answer failed)");
@@ -216,12 +317,18 @@ public class TelephonyBackgroundService(
             : (CallSource.Inbound, SourceClassification.Default, callerNumber);
     }
 
-    private static VoIPMediaSession CreateSilenceMediaSession()
+    private VoIPMediaSession CreateSilenceMediaSession()
     {
         var audioSource = new AudioExtrasSource(
             new AudioEncoder(),
             new AudioSourceOptions { AudioSource = AudioSourcesEnum.Silence });
-        var mediaSession = new VoIPMediaSession(new MediaEndPoints { AudioSource = audioSource });
+        var mediaSession = new NatAwareVoIPMediaSession(
+            new VoIPMediaSessionConfig
+            {
+                MediaEndPoint = new MediaEndPoints { AudioSource = audioSource },
+                RtpPortRange = _rtpPortRange,
+            },
+            _publicAddress);
         mediaSession.AcceptRtpFromAny = true;
         return mediaSession;
     }

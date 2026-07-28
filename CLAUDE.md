@@ -94,6 +94,31 @@ Frontend (`CallTree.UI/`): pnpm (`pnpm dev`, `pnpm build`, `pnpm lint`).
 - SQLite won't create missing parent directories — `Program.EnsureDatabase` handles it; keep that when touching startup.
 - Runtime data (`CallTree.Api/data/` — db + recordings) is gitignored; recordings root is config (`Storage:RecordingsRoot`).
 - Answer OPTIONS keepalives (already done) or Asterisk marks the extension unreachable.
+- **`sendUsernameInContactHeader: true` is mandatory on `SIPRegistrationUserAgent`.** SIPSorcery defaults it
+  to *false*, which sends `Contact: <sip:47.204.201.45:5060>` with no user part. Telnyx still answers
+  `200 OK` (digest auth is valid), so registration looks perfectly healthy from our side — but Telnyx cannot
+  tie the binding to a connection, its registration status reads `Unregistered` with every field `null`, and
+  inbound calls have no destination so the caller just hears a busy tone. The `sip_username: null` in
+  Telnyx's status response is the tell: it is reporting the *Contact* user, which we weren't sending.
+- **NAT: `Telephony:PublicHost` is mandatory when running behind a router.** SIPSorcery substitutes the
+  *local* address into the REGISTER `Contact` (see `SIPTransport.ContactHost`), so without it the trunk is
+  told to reach us at a LAN address and inbound INVITEs never arrive — the caller just hears a busy/failure
+  tone and the process logs nothing at all.
+- **`SIPUserAgent.Answer(publicIpAddress:)` does not do what its name suggests.** It is only a *fallback*:
+  `RTPSession.GetSdpConnectionAddress` prefers the local address that routes to the offer's connection
+  address and uses the supplied one only when the offer carries none. A trunk always sends one, so the
+  argument never wins and the SDP goes out advertising the LAN address — signalling succeeds, then the trunk
+  streams RTP into the void. `NatAwareVoIPMediaSession` overrides `CreateAnswer`/`CreateOffer` and rewrites
+  the address afterwards; keep using it for every media session, including Phase 4's outbound legs.
+- **Set `Telephony:TraceSip` to see whole SIP messages** on the wire (`SIPRequestInTraceEvent` and friends).
+  This is the only reliable way to diagnose NAT/routing; it is on in `appsettings.Development.json`.
+- Telnyx's registrar echoes the stored binding in its `200 OK` `Contact` — the fastest way to confirm what
+  address the trunk will actually dial.
+- Useful reachability check that needs no second phone: send a SIP `OPTIONS` to the *public* IP from the LAN.
+  Ubiquiti hairpins it back through the port-forward, so a `200 Ok` proves the forward + Windows firewall
+  path end to end. A `received=` of the router's LAN IP confirms it really traversed the DNAT rule.
+- Windows firewall rules are per-executable: the project rename means the rule must target
+  `CallTree.Api.exe`, and the Wi-Fi network profile is **Public**, so the rule has to cover that profile.
 - Legal: Florida is **all-party consent** for recording. The consent-disclosure approach is an open decision —
   never silently drop or "simplify away" disclosure prompts/tones once they exist.
 

@@ -53,9 +53,32 @@ What has been built so far. See [TODO.md](TODO.md) for remaining work and the fu
 - Vulnerable transitive packages pinned to patched versions (`SQLitePCLRaw.bundle_e_sqlite3`, `Microsoft.OpenApi`).
 - Local `dotnet-ef` tool installed via `dotnet-tools.json` manifest.
 
+## Phase 1 trunk bring-up (Telnyx) — 2026-07-28
+
+Went straight to the real trunk instead of the planned FreePBX interim step. Four separate faults stacked up,
+each masking the next; all four are now fixed and a real call from the cell has been answered and persisted.
+
+1. **REGISTER `Contact` had no user part.** SIPSorcery's `sendUsernameInContactHeader` defaults to *false*.
+   Telnyx answered `200 OK` (digest auth was valid) so registration looked healthy, but it could not tie the
+   binding to a connection — portal status read `Unregistered` with every field `null`, and inbound calls had
+   no destination. Fixed by passing `sendUsernameInContactHeader: true`.
+2. **`Contact`/SDP advertised the LAN address.** Added `Telephony:PublicHost`, applied to
+   `SIPTransport.ContactHost`.
+3. **SDP still advertised the LAN address** even after passing `publicIpAddress:` to `Answer` — that argument
+   is only a fallback, and `RTPSession.GetSdpConnectionAddress` prefers the local address that routes to the
+   offer. Fixed with `NatAwareVoIPMediaSession`, which rewrites the answer after the base class builds it.
+   Verified by a local test call: `c=IN IP4 47.204.201.45`, RTP on port 10000.
+4. **Telnyx trial tier refused every call** in both directions until the cell was added as the account's
+   verified number. Telnyx generated the busy tone itself (`486`/`send_refuse`, blank Connection Id), so no
+   INVITE was ever sent — which is why nothing appeared locally regardless of router or transport changes.
+
+Also added along the way: `Telephony:TraceSip` (full SIP wire logging — the only thing that made any of this
+visible), a TCP listener, and the RTP port range from config, which was previously ignored.
+
 ## Validation status
 
 - Phase 0: validated (build, tests, boot, migration, `/health`).
-- Phase 1: validated E2E against a local scripted caller. **Pending**: Scott's manual validation against the
-  real FreePBX/Asterisk box (register as an extension, dial it from a phone).
+- Phase 1: **validated end to end over the real Telnyx trunk** — INVITE received, caller classified,
+  answered, held, hung up, `Call` + `CallLeg` persisted. Also still passes against a local scripted caller.
+- 21 unit tests passing.
 - Nothing committed to git yet.

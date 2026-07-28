@@ -6,10 +6,27 @@ Completed work: [PROGRESS.md](PROGRESS.md).
 
 ## Immediate
 
-- [ ] Manual Phase 1 validation against FreePBX/Asterisk (register as extension, dial from a phone, check
-      logs + `data/calltree.db`). Secrets go in user secrets: `Trunk:Host`, `Trunk:Username`, `Trunk:Password`,
-      `Telephony:MyCellNumber`.
+- [x] Manual Phase 1 validation — real call from the cell through Telnyx, answered and persisted.
+- [ ] **Upgrade off the Telnyx trial tier so anyone can call the DID.** Trial restricts voice in *both*
+      directions to a single verified number ("Inbound limited to receiving from the verified phone
+      number"), one verified number at a time, 10 changes per account lifetime. Adding the cell as the
+      verified number unblocked testing, but every other caller still gets refused before an INVITE is sent
+      (`486`/`D61` inbound, `603`/`D38` outbound, blank Connection Id in the CDR either way). The Paid tier
+      documents no inbound restriction. Trial also caps 2 concurrent outbound calls and 10 minutes per
+      call — the 10-minute ceiling will truncate recordings, so this is a hard blocker by Phase 3/5.
+- [ ] Constrain the codec offer to PCMU. The answer currently echoes the trunk's full list and Telnyx put
+      G722 first, so a real call negotiates G722 — the plan assumes PCMU-only, and Phase 3's decode and
+      Phase 4's payload-relay bridging both depend on that.
 - [ ] First git commit (Phases 0–1).
+
+## Security — before Phase 4
+
+- [ ] **Restrict inbound SIP to Telnyx's signalling ranges.** Within ~30 minutes of exposing UDP 5060 the
+      log picked up four unsolicited probes, including `OPTIONS sip:100@47.204.201.45` — an extension sweep
+      looking for an open PBX. Today the risk is low (Phase 1 answers, holds 5 s, hangs up, and cannot dial
+      out), but Phase 4 adds outbound legs, at which point an unauthenticated INVITE from the internet
+      becomes a toll-fraud vector. Allowlist at the router *and* reject in `HandleIncomingCallAsync` on
+      unknown source addresses.
 
 ## Phase 2 — Media out + DTMF in
 
@@ -40,10 +57,19 @@ Completed work: [PROGRESS.md](PROGRESS.md).
 
 ## Phase 6 — Real trunk cutover + resilience
 
-- [ ] Choose trunk provider (open question: VoIP.ms lean vs Telnyx vs Flowroute) and point CallTree at it.
+- [x] Choose trunk provider — **Telnyx**, DID (941) 304-0304, credential registration as `voipserver@sip.telnyx.com`.
+- [x] Constrain SIPSorcery RTP ports to `Telephony:RtpPortStart/End` to match router forwards.
 - [ ] Registration resilience: backoff tuning, network-blip recovery, registration state on `/health`.
+- [ ] `Trunk:AuthUsername` is currently only warned about, not honoured — wiring it up means moving to the
+      long `SIPRegistrationUserAgent` overload (AOR, realm, contact URI, custom headers). Telnyx doesn't
+      need it; do it if a provider that splits SIP and auth usernames is ever used.
 - [ ] Startup sweep to repair unfinalized WAVs (recompute RIFF sizes from file length; clear `FinalizedAt` gap).
-- [ ] Constrain SIPSorcery RTP ports to `Telephony:RtpPortStart/End` (currently defaults) to match router forwards.
+- [ ] `Telephony:PublicHost` is currently a hard-coded WAN IP in user secrets. Residential IPs change —
+      switch to a DDNS hostname, or discover the public address at startup via SIPSorcery's `STUNClient`
+      and re-check it periodically.
+- [ ] Replace the single long-lived `SIPUserAgent` with a per-call agent. One agent holds one dialogue, so a
+      second concurrent call (or a dialogue left behind by an abnormal teardown) is *silently dropped* with no
+      log line — indistinguishable from a network fault. Folds into the Phase 4 `CallSession` refactor.
 
 ## Phase 7 — REST API
 
