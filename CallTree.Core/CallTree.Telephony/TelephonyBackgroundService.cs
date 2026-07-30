@@ -2,6 +2,7 @@ using System.Net;
 using CallTree.Application.Calls;
 using CallTree.Domain.Calls;
 using CallTree.Domain.ValueObjects;
+using CallTree.Telephony.Audio;
 using CallTree.Telephony.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
@@ -23,6 +24,7 @@ namespace CallTree.Telephony;
 public class TelephonyBackgroundService(
     IOptions<TrunkOptions> trunkOptions,
     IOptions<TelephonyOptions> telephonyOptions,
+    PromptLibrary prompts,
     IServiceScopeFactory scopeFactory,
     ILoggerFactory loggerFactory) : BackgroundService
 {
@@ -32,6 +34,7 @@ public class TelephonyBackgroundService(
     private SIPTransport? _sipTransport;
     private SIPRegistrationUserAgent? _registrationUserAgent;
     private PhoneNumber? _myCellNumber;
+    private PhoneNumber? _didNumber;
     private IPAddress? _publicAddress;
     private PortRange? _rtpPortRange;
 
@@ -42,7 +45,7 @@ public class TelephonyBackgroundService(
 
         if (!trunk.IsConfigured)
         {
-            _logger.LogWarning("Trunk is not configured (Trunk:Host / Trunk:Username missing) — telephony is idle.");
+            _logger.LogWarning("Trunk is not configured (Trunk:Host / Trunk:Username missing) - telephony is idle.");
             return;
         }
 
@@ -52,7 +55,18 @@ public class TelephonyBackgroundService(
         }
         else
         {
-            _logger.LogWarning("Telephony:MyCellNumber is not set — all calls will be classified as Inbound.");
+            _logger.LogWarning("Telephony:MyCellNumber is not set - all calls will be classified as Inbound.");
+        }
+
+        if (PhoneNumber.TryParse(telephony.DidNumber, out var did))
+        {
+            _didNumber = did;
+        }
+        else
+        {
+            _logger.LogWarning(
+                "Telephony:DidNumber is not set - every INVITE reaching this port will be answered, "
+                + "including the dial-plan probes that scanners aim at any open SIP port.");
         }
 
         // Route SIPSorcery's internal logging through the host's logging pipeline.
@@ -82,7 +96,7 @@ public class TelephonyBackgroundService(
         _logger.LogInformation(
             "SIP listening on {Channels}; advertising {ContactHost} in Contact/SDP; RTP {RtpStart}-{RtpEnd}; SIP trace {TraceState}",
             string.Join(", ", _sipTransport.GetSIPChannels().Select(c => c.ListeningSIPEndPoint.ToString())),
-            _sipTransport.ContactHost is { Length: > 0 } host ? host : "(local address — NAT will break inbound calls)",
+            _sipTransport.ContactHost is { Length: > 0 } host ? host : "(local address - NAT will break inbound calls)",
             telephony.RtpPortStart,
             telephony.RtpPortEnd,
             telephony.TraceSip ? "on" : "off");
@@ -212,6 +226,22 @@ public class TelephonyBackgroundService(
         var rawCallerId = request.Header.From.FromURI.User ?? "";
         var remoteEndPoint = request.RemoteSIPEndPoint?.ToString() ?? "unknown";
 
+        if (!IsAddressedToUs(request))
+        {
+            _logger.LogWarning(
+                "Rejecting INVITE for {RequestUri} from {RawCallerId} at {RemoteEndPoint} (User-Agent '{UserAgent}') - "
+                + "not addressed to {Did}.",
+                request.URI.ToString(),
+                rawCallerId,
+                remoteEndPoint,
+                request.Header.UserAgent ?? "-",
+                _didNumber!.Value);
+
+            var rejection = new UASInviteTransaction(_sipTransport, request, null);
+            rejection.SendFinalResponse(SIPResponse.GetResponse(request, SIPResponseStatusCodesEnum.NotFound, null));
+            return;
+        }
+
         var (source, classification, callerNumber) = ClassifyCaller(rawCallerId);
 
         _logger.LogInformation(
@@ -236,21 +266,21 @@ public class TelephonyBackgroundService(
             return;
         }
 
-        // Guard so remote-BYE and local-hangup paths can't both record an ending.
+        // Guard so the remote-BYE, screening and local-hangup paths can't each record an ending.
         var ended = 0;
-        async Task RecordEndOnceAsync(HangupInitiator initiator, string reason)
+        async Task EndOnceAsync(Func<CallLifecycleService, Task> record, string description)
         {
             if (Interlocked.Exchange(ref ended, 1) == 1)
             {
                 return;
             }
 
-            _logger.LogInformation("Call {CallId} ended ({Initiator}): {Reason}", callId, initiator, reason);
+            _logger.LogInformation("Call {CallId} ended: {Description}", callId, description);
             try
             {
                 await WithLifecycleAsync(async lifecycle =>
                 {
-                    await lifecycle.EndAsync(callId, DateTimeOffset.UtcNow, initiator, reason);
+                    await record(lifecycle);
                     return 0;
                 });
             }
@@ -260,52 +290,133 @@ public class TelephonyBackgroundService(
             }
         }
 
-        userAgent.OnCallHungup += dialogue => _ = RecordEndOnceAsync(HangupInitiator.Remote, "remote hangup");
-        userAgent.OnDtmfTone += (tone, duration) =>
-            _logger.LogInformation("Call {CallId}: DTMF tone {Tone} ({Duration}ms)", callId, tone, duration);
+        Task EndByHangupAsync(HangupInitiator initiator, string reason) => EndOnceAsync(
+            lifecycle => lifecycle.EndAsync(callId, DateTimeOffset.UtcNow, initiator, reason),
+            $"{initiator} - {reason}");
+
+        // Lets the screening gate abandon prompt playback the moment the caller drops.
+        var hangup = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
+        userAgent.OnCallHungup += dialogue =>
+        {
+            try
+            {
+                hangup.Cancel();
+            }
+            catch (ObjectDisposedException)
+            {
+            }
+
+            _ = EndByHangupAsync(HangupInitiator.Remote, "remote hangup");
+        };
 
         try
         {
             var serverUserAgent = userAgent.AcceptCall(request);
-            var mediaSession = CreateSilenceMediaSession();
+            var (mediaSession, audioSource) = CreateMediaSession();
 
             var answered = await userAgent.Answer(serverUserAgent, mediaSession, publicIpAddress: _publicAddress);
             if (!answered)
             {
-                await RecordEndOnceAsync(HangupInitiator.Remote, "not answered (cancelled or answer failed)");
+                await EndByHangupAsync(HangupInitiator.Remote, "not answered (cancelled or answer failed)");
                 return;
             }
 
-            _logger.LogInformation("Call {CallId} answered; holding {Seconds}s of silence (phase 1)", callId, Phase1HoldDuration.TotalSeconds);
             await WithLifecycleAsync(async lifecycle =>
             {
                 await lifecycle.AnswerAsync(callId, DateTimeOffset.UtcNow);
                 return 0;
             });
 
-            try
+            if (source == CallSource.Inbound)
             {
-                await Task.Delay(Phase1HoldDuration, stoppingToken);
+                await ScreenAsync(callId, userAgent, audioSource, EndOnceAsync, hangup.Token);
             }
-            catch (OperationCanceledException)
+            else
             {
+                // Phase 3 replaces this with auto-answer + recording for the Outbound (my cell) path.
+                _logger.LogInformation(
+                    "Call {CallId} answered; holding {Seconds}s of silence (outbound path is still the phase 1 stub)",
+                    callId, Phase1HoldDuration.TotalSeconds);
+                try
+                {
+                    await Task.Delay(Phase1HoldDuration, hangup.Token);
+                }
+                catch (OperationCanceledException)
+                {
+                }
+
+                await EndByHangupAsync(HangupInitiator.Local, "phase 1 auto-hangup");
             }
+
+            // Stop the silence generator before tearing down, or its 20 ms timer fires once more against
+            // the already-closed RTP session and logs "SendRtpRaw was called ... on a closed RTP session".
+            await audioSource.CloseAudio();
 
             if (userAgent.IsCallActive)
             {
-                await RecordEndOnceAsync(HangupInitiator.Local, "phase 1 auto-hangup");
                 userAgent.Hangup();
             }
         }
         catch (Exception ex)
         {
             _logger.LogError(ex, "Error handling call {CallId}", callId);
-            await RecordEndOnceAsync(HangupInitiator.Local, $"error: {ex.Message}");
+            await EndByHangupAsync(HangupInitiator.Local, $"error: {ex.Message}");
             if (userAgent.IsCallActive)
             {
                 userAgent.Hangup();
             }
         }
+        finally
+        {
+            hangup.Dispose();
+        }
+    }
+
+    /// <summary>Runs the press-1 spam gate and records its outcome.</summary>
+    private async Task ScreenAsync(
+        Guid callId,
+        SIPUserAgent userAgent,
+        AudioExtrasSource audioSource,
+        Func<Func<CallLifecycleService, Task>, string, Task> endOnceAsync,
+        CancellationToken cancellationToken)
+    {
+        var telephony = telephonyOptions.Value;
+
+        var gate = new ScreeningGate(
+            userAgent,
+            audioSource,
+            prompts,
+            telephony.ScreeningDigit,
+            TimeSpan.FromSeconds(telephony.ScreeningTimeoutSeconds),
+            _logger);
+
+        var (outcome, digit) = await gate.RunAsync(callId, cancellationToken);
+
+        var reason = outcome switch
+        {
+            ScreeningOutcome.Passed => $"screening passed (pressed {digit})",
+            ScreeningOutcome.WrongDigit => $"screened out (pressed {digit}, expected {telephony.ScreeningDigit})",
+            _ => $"screened out (no input within {telephony.ScreeningTimeoutSeconds}s)",
+        };
+
+        await endOnceAsync(
+            lifecycle => lifecycle.ScreeningCompletedAsync(callId, outcome, DateTimeOffset.UtcNow, reason),
+            reason);
+    }
+
+    /// <summary>
+    /// Whether the INVITE is for our DID. Scanners sweep the request URI looking for a dial plan that will
+    /// place an international call for them, so the URI user is the thing that distinguishes a real call
+    /// from a probe — comparison is on the normalised number, since trunks vary on the +1 prefix.
+    /// </summary>
+    private bool IsAddressedToUs(SIPRequest request)
+    {
+        if (_didNumber is null)
+        {
+            return true;
+        }
+
+        return PhoneNumber.TryParse(request.URI.User, out var dialled) && dialled == _didNumber;
     }
 
     private (CallSource Source, SourceClassification Classification, PhoneNumber? CallerNumber) ClassifyCaller(string rawCallerId)
@@ -317,11 +428,21 @@ public class TelephonyBackgroundService(
             : (CallSource.Inbound, SourceClassification.Default, callerNumber);
     }
 
-    private VoIPMediaSession CreateSilenceMediaSession()
+    /// <summary>
+    /// Builds the media session for a call, returning the audio source alongside it so prompts can be
+    /// streamed into the live call. Silence is the baseline; prompts interrupt it.
+    /// </summary>
+    private (NatAwareVoIPMediaSession Session, AudioExtrasSource AudioSource) CreateMediaSession()
     {
         var audioSource = new AudioExtrasSource(
             new AudioEncoder(),
             new AudioSourceOptions { AudioSource = AudioSourcesEnum.Silence });
+
+        // Offer PCMU only. G.711 u-law is symmetric 2:1 with 16-bit PCM, which keeps the Phase 3 decode
+        // and the Phase 4 payload relay trivial; left unrestricted, Telnyx negotiates G722. DTMF is
+        // unaffected — MediaStream adds the RFC 4733 telephone-event payload separately from the codecs.
+        audioSource.RestrictFormats(format => format.Codec == AudioCodecsEnum.PCMU);
+
         var mediaSession = new NatAwareVoIPMediaSession(
             new VoIPMediaSessionConfig
             {
@@ -330,7 +451,7 @@ public class TelephonyBackgroundService(
             },
             _publicAddress);
         mediaSession.AcceptRtpFromAny = true;
-        return mediaSession;
+        return (mediaSession, audioSource);
     }
 
     /// <summary>Runs an operation against a scoped <see cref="CallLifecycleService"/> (one DI scope per telephony event).</summary>

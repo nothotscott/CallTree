@@ -108,6 +108,17 @@ public class Call : AggregateRoot
         End(CallStatus.Completed, when, reason);
     }
 
+    /// <summary>
+    /// Caller passed the IVR gate, but there is nothing to connect them to yet.
+    /// Phase 2 only: Phase 4 replaces this with <see cref="BeginDialing"/> followed by
+    /// <see cref="Bridge"/>, and this method should be deleted once bridging lands.
+    /// </summary>
+    public void CompleteScreening(DateTimeOffset when, string reason)
+    {
+        EnsureStatus(CallStatus.Screening);
+        End(CallStatus.Completed, when, reason);
+    }
+
     /// <summary>Caller never passed the IVR gate (timeout, wrong key, or hung up).</summary>
     public void ScreenOut(DateTimeOffset when, string reason)
     {

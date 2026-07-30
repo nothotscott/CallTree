@@ -9,6 +9,8 @@
 
   <ItemGroup>
     <ProjectReference Include="..\CallTree.Domain\CallTree.Domain.csproj" />
+    <!-- For the pure WAV/timing logic in CallTree.Telephony.Audio. -->
+    <ProjectReference Include="..\CallTree.Telephony\CallTree.Telephony.csproj" />
   </ItemGroup>
 
   <ItemGroup>

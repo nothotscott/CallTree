@@ -43,6 +43,29 @@ public class CallStateMachineTests
     }
 
     [Fact]
+    public void CompleteScreening_ends_a_passed_call_without_bridging()
+    {
+        var call = StartInbound();
+        call.Answer(T0.AddSeconds(2));
+
+        call.CompleteScreening(T0.AddSeconds(9), "screening passed (pressed 1)");
+
+        Assert.Equal(CallStatus.Completed, call.Status);
+        Assert.Equal("screening passed (pressed 1)", call.TerminationReason);
+        Assert.True(call.IsTerminal);
+        Assert.All(call.Legs, leg => Assert.NotNull(leg.EndedAt));
+    }
+
+    [Fact]
+    public void CompleteScreening_is_only_legal_while_screening()
+    {
+        var call = StartOutboundSource();
+        call.Answer(T0.AddSeconds(1));
+
+        Assert.Throws<InvalidOperationException>(() => call.CompleteScreening(T0.AddSeconds(5), "nope"));
+    }
+
+    [Fact]
     public void Outbound_source_answer_goes_straight_to_in_progress()
     {
         var call = StartOutboundSource();

@@ -1,3 +1,4 @@
+using CallTree.Telephony.Audio;
 using CallTree.Telephony.Configuration;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
@@ -10,6 +11,7 @@ public static class DependencyInjection
     {
         services.Configure<TrunkOptions>(configuration.GetSection(TrunkOptions.SectionName));
         services.Configure<TelephonyOptions>(configuration.GetSection(TelephonyOptions.SectionName));
+        services.AddSingleton<PromptLibrary>();
         services.AddHostedService<TelephonyBackgroundService>();
 
         return services;

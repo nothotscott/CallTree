@@ -33,6 +33,40 @@ public class CallLifecycleService(ICallRepository repository)
     }
 
     /// <summary>
+    /// Records the outcome of the IVR screening gate. Phase 2 ends the call either way; Phase 4 will
+    /// replace the <see cref="ScreeningOutcome.Passed"/> branch with dialing the cell and bridging.
+    /// </summary>
+    public async Task ScreeningCompletedAsync(
+        Guid callId,
+        ScreeningOutcome outcome,
+        DateTimeOffset when,
+        string reason,
+        CancellationToken cancellationToken = default)
+    {
+        var call = await GetRequiredAsync(callId, cancellationToken);
+        if (call.IsTerminal)
+        {
+            return;
+        }
+
+        foreach (var leg in call.Legs.Where(l => l.EndedAt is null))
+        {
+            leg.End(when, HangupInitiator.Local);
+        }
+
+        if (outcome == ScreeningOutcome.Passed)
+        {
+            call.CompleteScreening(when, reason);
+        }
+        else
+        {
+            call.ScreenOut(when, reason);
+        }
+
+        await repository.SaveChangesAsync(cancellationToken);
+    }
+
+    /// <summary>
     /// Ends the call with the terminal state appropriate to its current status
     /// (Ringing→Failed, Screening→ScreenedOut, Dialing→Missed, InProgress→Completed).
     /// No-op if the call is already terminal.

@@ -25,6 +25,23 @@ public sealed class TelephonyOptions
     public bool TraceSip { get; init; }
 
     /// <summary>
+    /// The DID this instance owns. Inbound INVITEs addressed to anything else are rejected with 404
+    /// before a Call row is created — an open SIP port attracts constant dial-plan probing for toll
+    /// fraud, and answering those calls both confirms a live PBX and fills the database with junk.
+    /// Leave blank to accept any request URI (the pre-Phase-2 behaviour).
+    /// </summary>
+    public string DidNumber { get; init; } = "";
+
+    /// <summary>Directory holding the IVR prompt WAVs (8 or 16 kHz, 16-bit, mono PCM).</summary>
+    public string PromptsRoot { get; init; } = "prompts";
+
+    /// <summary>The digit an inbound caller must press to get past the spam gate.</summary>
+    public byte ScreeningDigit { get; init; } = 1;
+
+    /// <summary>How long to wait for that digit before screening the caller out.</summary>
+    public int ScreeningTimeoutSeconds { get; init; } = 12;
+
+    /// <summary>
     /// Also listen for SIP over TCP on <see cref="SipListenPort"/>. Outbound registration stays on UDP;
     /// this only covers a trunk whose inbound transport is set to TCP, which would otherwise deliver to a
     /// closed port and leave no trace on our side.

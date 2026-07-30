@@ -21,19 +21,39 @@ Completed work: [PROGRESS.md](PROGRESS.md).
 
 ## Security — before Phase 4
 
-- [ ] **Restrict inbound SIP to Telnyx's signalling ranges.** Within ~30 minutes of exposing UDP 5060 the
-      log picked up four unsolicited probes, including `OPTIONS sip:100@47.204.201.45` — an extension sweep
-      looking for an open PBX. Today the risk is low (Phase 1 answers, holds 5 s, hangs up, and cannot dial
-      out), but Phase 4 adds outbound legs, at which point an unauthenticated INVITE from the internet
-      becomes a toll-fraud vector. Allowlist at the router *and* reject in `HandleIncomingCallAsync` on
-      unknown source addresses.
+- [x] **Reject INVITEs not addressed to our DID** (`Telephony:DidNumber`, 404 before any Call row is
+      created). `217.160.58.53` is actively sweeping dial-plan prefixes at this host — `011`, `9011`, `00`
+      and bare, all aimed at `390237902590` (Milan, Italy) — which is textbook toll-fraud enumeration.
+      Before the filter, CallTree answered every probe and played 12 s of greeting, which both confirms a
+      live PBX to the attacker and fills the database with junk rows.
+- [ ] **Restrict the router port-forward to Telnyx's addresses.** This is the right layer — it drops the
+      packets before they reach the host at all. The probes do *not* arrive via Telnyx; they are sent
+      straight to `47.204.201.45:5060` from the open internet, so no Telnyx account setting can stop them.
+      Per <https://sip.telnyx.com/>, the US region signals from exactly **192.76.120.10** and
+      **64.16.250.10** (both confirmed in our logs as the source of every real call). Media/RTP arrives from
+      `36.255.198.128/25`, `50.114.136.128/25`, `50.114.144.0/21`, `64.16.226.0/24`–`64.16.230.0/24`,
+      `64.16.248.0/24`, `64.16.249.0/24`, `103.115.244.128/25`, `103.115.247.128/27`, `185.246.41.128/25`,
+      `185.246.42.128/28`. Scope 5060/udp to the two signalling IPs and 10000–10100/udp to the media ranges.
+- [ ] Optionally mirror that allowlist in `HandleIncomingCallAsync` as defence in depth, in case the
+      forward is ever widened or the host is moved.
+- [ ] Consider rate-limiting or temporarily blocklisting source addresses that get repeatedly rejected —
+      the probes arrive in bursts and each one still costs a transaction.
 
-## Phase 2 — Media out + DTMF in
+## Phase 2 — Media out + DTMF in ✅ (code-complete, pending phone validation)
 
-- [ ] Play a WAV prompt on answer (PCM → G.711 via SIPSorcery `AudioExtrasSource.SendAudioFromStream`).
-- [ ] DTMF detection via RFC 4733 (`OnDtmfTone` — logging already wired).
-- [ ] Press-1 IVR gate: on "1" play confirmation and hang up (no bridge yet); timeout → `ScreenedOut`.
-- [ ] Prompt WAV assets + where they live (embedded resource vs content directory).
+- [x] Play a WAV prompt on answer (`AudioExtrasSource.SendAudioFromStream`, which takes *raw* PCM —
+      `WavAudio` unwraps the RIFF container at load).
+- [x] DTMF detection via RFC 4733 (`OnDtmfTone`, first tone latched to ignore per-keypress repeats).
+- [x] Press-1 IVR gate with barge-in; passed → `Completed`, wrong key or timeout → `ScreenedOut`.
+- [x] Prompt WAVs in `CallTree.Api/prompts/` (content directory, not embedded — the wording has to be
+      changeable without a rebuild). Regenerate with `tools/generate-prompts.ps1`.
+- [x] Codec restricted to PCMU.
+- [ ] **Scott: validate by phone** — call the DID, hear the prompt, press 1; then call again and press
+      nothing. Check `Calls.Status` is `Completed` vs `ScreenedOut`.
+- [ ] **Decide the consent disclosure wording** and re-run `tools/generate-prompts.ps1`. The current
+      greeting ("This call will be recorded") is a placeholder chosen to err toward disclosing; Florida is
+      all-party consent and the real wording/placement is still an open decision.
+- [ ] Replace the TTS placeholders with real recordings if the robotic voice grates.
 
 ## Phase 3 — Outbound-source path + mono recording
 

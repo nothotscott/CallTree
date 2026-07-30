@@ -119,6 +119,20 @@ Frontend (`CallTree.UI/`): pnpm (`pnpm dev`, `pnpm build`, `pnpm lint`).
   path end to end. A `received=` of the router's LAN IP confirms it really traversed the DNAT rule.
 - Windows firewall rules are per-executable: the project rename means the rule must target
   `CallTree.Api.exe`, and the Wi-Fi network profile is **Public**, so the rule has to cover that profile.
+- **The public SIP port is under continuous attack.** `Telephony:DidNumber` makes CallTree reject any INVITE
+  whose request URI isn't our DID (404, before a Call row exists). Scanners sweep dial-plan prefixes
+  (`011…`, `9011…`, `00…`) hunting for a PBX that will place an international call for them. Don't remove
+  this, and don't widen it — Phase 4's outbound leg is what turns a probe into a phone bill.
+- **Close the audio source before hanging up.** `AudioExtrasSource` runs a 20 ms timer; if the RTP session
+  closes first it logs "SendRtpRaw was called for a audio packet on a closed RTP session". `CloseAudio()`
+  disposes the timer and the warning goes away. Cosmetic, but it makes real problems harder to spot.
+- **`AudioExtrasSource.SendAudioFromStream` takes raw 16-bit PCM, not a WAV file** — pass a `.wav` straight
+  through and the 44-byte RIFF header is played as a burst of noise. `WavAudio.ReadPcm` unwraps it; prompts
+  must be 8 or 16 kHz, 16-bit, mono.
+- Restricting the audio formats to PCMU does **not** disable DTMF: `MediaStream` adds the RFC 4733
+  telephone-event payload (101) separately from the negotiated codec list.
+- A single DTMF keypress raises `OnDtmfTone` more than once (the tone spans several RTP packets). Latch the
+  first tone or you will process one keypress as several.
 - Legal: Florida is **all-party consent** for recording. The consent-disclosure approach is an open decision —
   never silently drop or "simplify away" disclosure prompts/tones once they exist.
 

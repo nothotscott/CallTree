@@ -23,4 +23,9 @@
     <ProjectReference Include="..\CallTree.Telephony\CallTree.Telephony.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <!-- PromptLibrary resolves these against the content root, which is the output directory once published. -->
+    <Content Include="prompts\**\*.wav" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
 </Project>
