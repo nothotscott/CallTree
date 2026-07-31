@@ -24,8 +24,8 @@ public static class PromptNames
 /// <remarks>
 /// Prompts live in a configured directory rather than being embedded in the assembly, because the
 /// wording is expected to change without a rebuild — the recording disclosure in particular is an open
-/// legal decision (Florida is all-party consent). Decoding at startup means a malformed or missing file
-/// is a loud problem at boot instead of silence in the middle of a real call.
+/// legal decision that varies by jurisdiction, and several require every party to consent. Decoding at
+/// startup means a malformed or missing file is a loud problem at boot instead of silence mid-call.
 /// </remarks>
 public sealed class PromptLibrary
 {

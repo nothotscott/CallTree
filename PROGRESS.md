@@ -1,104 +1,109 @@
 # CallTree — Progress
 
-What has been built so far. See [TODO.md](TODO.md) for remaining work and the full plan at
-`C:\Users\Scott\.claude\plans\project-brief-self-hosted-serene-music.md` for rationale.
+What has been built so far. Remaining work is in [TODO.md](TODO.md); the overview is in
+[README.md](README.md).
 
 ## Phase 0 — Foundation ✅
 
-- Split the backend from a single template project into DDD projects under `CallTree.Core/`, all in `CallTree.Core.slnx`:
+- Backend split into layered projects under `CallTree.Core/`, all in `CallTree.Core.slnx`:
   - **CallTree.Domain** — entities, value objects, enums, domain events; zero dependencies.
-  - **CallTree.Application** — ports (`ICallRepository`) and use-case services.
+  - **CallTree.Application** — ports (`ICallRepository`), use-case services, call commands.
   - **CallTree.Infrastructure** — EF Core + SQLite persistence.
   - **CallTree.Telephony** — SIPSorcery/NAudio; hosted service that owns the SIP user agent.
-  - **CallTree.Api** — ASP.NET Core host (renamed from the old `CallTree.Core` project); wires DI, hosts telephony.
-  - **CallTree.Tests** — xUnit (v3).
+  - **CallTree.Api** — ASP.NET Core host; wires DI and hosts telephony.
+  - **CallTree.Tests** — xUnit v3.
 - Domain model: `Call` aggregate root with an enforced state machine
-  (`Ringing → Screening → Dialing → InProgress → Completed/ScreenedOut/Missed/Failed`), `CallLeg` (one SIP dialog
-  per leg; bridged calls will have two), `Recording` entity with `FinalizedAt` crash marker, `PhoneNumber` E.164
-  value object, domain events (`CallStarted/CallAnswered/CallBridged/CallEnded`).
-- Persistence: `CallTreeDbContext` (enums stored as strings), `CallRepository`, `InitialCreate` migration,
-  migration auto-applied at startup, db directory auto-created. DB lands in `CallTree.Api/data/` (gitignored).
-- Config binding: `Trunk`, `Telephony` (MyCellNumber, SIP/RTP ports), `Storage` sections; user secrets enabled
-  for sensitive values (`UserSecretsId` on the Api project).
-- `/health` endpoint; Scalar/OpenAPI kept from the template.
-- 21 unit tests: state-machine transitions, phone-number normalization, recording finalization, domain events.
+  (`Ringing → Screening → Dialing → InProgress → Completed/ScreenedOut/Missed/Failed`), `CallLeg` (one SIP
+  dialog per leg; bridged calls will have two), `Recording` with a `FinalizedAt` crash marker, a
+  `PhoneNumber` E.164 value object, and domain events (`CallStarted/CallAnswered/CallBridged/CallEnded`).
+- Persistence: `CallTreeDbContext` (enums stored as strings), `CallRepository`, `InitialCreate` migration
+  applied automatically at startup, database directory created if missing.
+- Configuration binding for the `Trunk`, `Telephony` and `Storage` sections; user secrets for sensitive
+  values in development.
+- `/health` endpoint; OpenAPI via Scalar in development.
 
-## Phase 1 — SIP signaling ✅ (code-complete, E2E-verified locally)
+## Phase 1 — SIP signalling ✅ (validated over a real trunk)
 
-- `TelephonyBackgroundService` now:
-  - Binds a UDP SIP channel on `Telephony:SipListenPort`.
-  - Registers with the trunk/PBX via `SIPRegistrationUserAgent`; all four registration events logged
-    (success / removed / temporary failure / failed). Retry-on-timeout path verified against a dead registrar.
-  - Routes SIPSorcery's internal logging into the host logging pipeline (`SIPSorcery.LogFactory.Set`).
-  - Answers `OPTIONS` keepalives so Asterisk `qualify` sees the extension as reachable.
-- Inbound call handling: logs every INVITE (caller ID, display name, remote endpoint, SIP Call-ID, User-Agent),
-  classifies the caller against `Telephony:MyCellNumber` (`Outbound/CallerIdMatch` vs `Inbound/Default`),
-  answers with a silence media session, holds 5 s, hangs up. Remote-BYE vs local-hangup races are guarded so
-  exactly one terminal state is recorded. DTMF tones are logged (Phase 2 groundwork).
-- `CallLifecycleService` (Application layer) drives the aggregate from telephony events —
-  `StartAsync` / `AnswerAsync` / `EndAsync`, with `EndAsync` choosing the correct terminal transition for the
-  current status. Telephony resolves it from a fresh DI scope per event.
-- **End-to-end verified**: a scratch SIPSorcery caller placed a real call; it was answered in ~350 ms, held 5 s,
-  hung up by CallTree, and the full `Call` + `CallLeg` row set appeared in SQLite with correct timestamps,
-  classification, and `HangupInitiator`.
-- Known Phase 1 quirk (intended): answered inbound calls end as `ScreenedOut` because they enter `Screening`
-  and no IVR gate exists yet; resolves itself in Phase 2.
+- `TelephonyBackgroundService` binds UDP (and optionally TCP) SIP channels, registers via
+  `SIPRegistrationUserAgent` with all four registration events logged, routes SIPSorcery's internal logging
+  into the host pipeline, and answers `OPTIONS` keepalives so the trunk sees the endpoint as reachable.
+- Inbound handling logs every INVITE, classifies the caller against `Telephony:MyCellNumber`
+  (`Outbound/CallerIdMatch` vs `Inbound/Default`), answers, and persists the `Call` aggregate. Remote-BYE
+  and local-hangup races are guarded so exactly one terminal state is recorded.
+- INVITEs not addressed to `Telephony:DidNumber` are rejected with 404 before any row is created.
+- `CallLifecycleService` drives the aggregate from telephony events, reached through `ICallCommands` so the
+  SIP code never handles DI scoping itself.
 
-## Phase 2 — Media out + DTMF in ✅ (code-complete, pending phone validation)
+### Trunk bring-up — four stacked faults
 
-- **Prompt playback.** `WavAudio` is a small RIFF reader that walks chunks (rather than assuming fixed
-  offsets) and returns raw 16-bit PCM, because `AudioExtrasSource.SendAudioFromStream` takes raw samples —
-  handing it a `.wav` plays the 44-byte header as noise. `PromptLibrary` decodes every prompt once at
-  startup so a bad file is a boot-time error, not silence mid-call. Prompts live in
-  `CallTree.Api/prompts/` and are regenerated by `tools/generate-prompts.ps1` (Windows TTS, 8 kHz/16-bit/mono).
-- **The gate.** `ScreeningGate` plays the greeting, accepts barge-in, and waits up to
-  `Telephony:ScreeningTimeoutSeconds` (12) for `Telephony:ScreeningDigit` (1). A single keypress raises
-  `OnDtmfTone` more than once, so the first tone is latched. Passing plays `accepted` and ends the call
-  `Completed`; a wrong key or timeout plays `rejected` and ends it `ScreenedOut`.
-- **Codec pinned to PCMU** via `AudioExtrasSource.RestrictFormats`. Unrestricted, Telnyx negotiated G722,
-  which would have broken Phase 3's decode and Phase 4's payload relay. DTMF is unaffected — `MediaStream`
-  adds the RFC 4733 telephone-event payload separately from the codec list.
-- **Domain**: `Call.CompleteScreening` covers "passed the gate but there is nothing to bridge to yet".
-  Phase 4 replaces it with `BeginDialing` + `Bridge`.
-- **Verified locally** with a scripted caller that sends real RFC 4733 DTMF: PCMU negotiated, ~170 non-silent
-  RTP packets received (so the prompt genuinely streamed), and all three outcomes land correctly in SQLite —
-  `Completed` for digit 1, `ScreenedOut` for digit 9 and for no input.
+Worth recording, because each one masked the next and all four present as "the phone just rings busy".
 
-## Environment / tooling decisions made along the way
-
-- Repo-local `NuGet.config` maps all packages to nuget.org, overriding the strict per-package
-  source-mapping allowlist in the user-level NuGet.Config.
-- `Microsoft.OpenApi` is pinned to **2.x** (2.10.0+): the `Microsoft.AspNetCore.OpenApi` source generator
-  compiles against the 2.x object model and fails (CS0200) with 3.x.
-- Vulnerable transitive packages pinned to patched versions (`SQLitePCLRaw.bundle_e_sqlite3`, `Microsoft.OpenApi`).
-- Local `dotnet-ef` tool installed via `dotnet-tools.json` manifest.
-
-## Phase 1 trunk bring-up (Telnyx) — 2026-07-28
-
-Went straight to the real trunk instead of the planned FreePBX interim step. Four separate faults stacked up,
-each masking the next; all four are now fixed and a real call from the cell has been answered and persisted.
-
-1. **REGISTER `Contact` had no user part.** SIPSorcery's `sendUsernameInContactHeader` defaults to *false*.
-   Telnyx answered `200 OK` (digest auth was valid) so registration looked healthy, but it could not tie the
-   binding to a connection — portal status read `Unregistered` with every field `null`, and inbound calls had
-   no destination. Fixed by passing `sendUsernameInContactHeader: true`.
-2. **`Contact`/SDP advertised the LAN address.** Added `Telephony:PublicHost`, applied to
+1. **The REGISTER `Contact` had no user part.** SIPSorcery's `sendUsernameInContactHeader` defaults to
+   *false*. The registrar answered `200 OK` because digest auth was valid, so registration looked perfectly
+   healthy — but the provider could not tie the binding to a connection, its portal reported the connection
+   unregistered with every field null, and inbound calls had no destination.
+2. **`Contact` and the SDP advertised the LAN address.** Added `Telephony:PublicHost`, applied via
    `SIPTransport.ContactHost`.
-3. **SDP still advertised the LAN address** even after passing `publicIpAddress:` to `Answer` — that argument
-   is only a fallback, and `RTPSession.GetSdpConnectionAddress` prefers the local address that routes to the
-   offer. Fixed with `NatAwareVoIPMediaSession`, which rewrites the answer after the base class builds it.
-   Verified by a local test call: `c=IN IP4 47.204.201.45`, RTP on port 10000.
-4. **Telnyx trial tier refused every call** in both directions until the cell was added as the account's
-   verified number. Telnyx generated the busy tone itself (`486`/`send_refuse`, blank Connection Id), so no
-   INVITE was ever sent — which is why nothing appeared locally regardless of router or transport changes.
+3. **The SDP still advertised the LAN address** even after passing `publicIpAddress:` to `Answer` — that
+   argument is only a fallback, and `RTPSession.GetSdpConnectionAddress` prefers the local address that
+   routes to the offer's connection address. Fixed with `NatAwareVoIPMediaSession`, which rewrites the
+   answer after the base class builds it.
+4. **The trunk account's tier refused every call in both directions** until the test mobile was added as a
+   verified number. The provider generated the busy tone itself (`486`, blank connection id in the CDR), so
+   no INVITE was ever sent — which is why nothing appeared locally regardless of router or transport
+   changes.
 
-Also added along the way: `Telephony:TraceSip` (full SIP wire logging — the only thing that made any of this
-visible), a TCP listener, and the RTP port range from config, which was previously ignored.
+`Telephony:TraceSip` (full SIP wire logging) is what made any of this visible and is the first thing to
+turn on when signalling misbehaves.
+
+## Phase 2 — Media out + DTMF in ✅ (validated by phone)
+
+Validated over the trunk: a call from a third-party number was classified `Inbound/Default`, heard the
+greeting, and passed the gate on digit 1 — `DTMF digit 1 (160ms)` → `screening passed` → `Completed`, with
+audio clearly audible on the handset. That exercises the PCM→G.711 encode path and the NAT-corrected SDP
+end to end.
+
+- **Prompt playback.** `WavAudio` is a small RIFF reader that walks chunks rather than assuming fixed
+  offsets and returns raw 16-bit PCM, because `AudioExtrasSource.SendAudioFromStream` takes raw samples —
+  hand it a `.wav` and the 44-byte header plays as noise. `PromptLibrary` decodes every prompt once at
+  startup so a bad file is a boot-time error rather than silence mid-call.
+- **The gate.** `ScreeningGate` plays the greeting, accepts barge-in, and waits up to
+  `Telephony:ScreeningTimeoutSeconds` for `Telephony:ScreeningDigit`. A single keypress raises `OnDtmfTone`
+  more than once, so the first tone is latched. Passing plays `accepted` and ends `Completed`; a wrong key
+  or a timeout plays `rejected` and ends `ScreenedOut`.
+- **Codec pinned to PCMU** via `AudioExtrasSource.RestrictFormats`. Unrestricted, the answer echoed the
+  trunk's full offer and G.722 was selected, which would have broken the Phase 3 decode and Phase 4 payload
+  relay. DTMF is unaffected — `MediaStream` adds the RFC 4733 telephone-event payload separately.
+- **Domain**: `Call.CompleteScreening` covers "passed the gate but there is nothing to bridge to yet", and
+  is replaced by `BeginDialing` + `Bridge` in Phase 4.
+- **Verified locally** with a scripted caller sending real RFC 4733 DTMF: PCMU negotiated, non-silent RTP
+  received (so the prompt genuinely streamed), and all three outcomes landing correctly in SQLite.
+
+## Cross-cutting work
+
+- **Call commands.** Telephony describes what happened as a `CallCommand` and hands it to `ICallCommands`,
+  which owns opening a DI scope per command. Telephony callbacks outlive any request while `DbContext` is
+  scoped, and the earlier approach — passing lambdas into a generic `WithLifecycleAsync` helper — put that
+  plumbing in front of the reader on every call site.
+- **Security.** An open SIP port draws continuous toll-fraud probing; one 40-minute window saw 276 rejected
+  INVITEs from four independent sources sweeping international dial prefixes. `Telephony:DidNumber` turns
+  these away in-process; importable router allowlists are in [`deploy/firewall/`](deploy/firewall/).
+- **Deployment.** Dockerfile, Compose file and a GitHub Actions workflow publishing to the GitHub Container
+  Registry live in [`deploy/`](deploy/), with notes for running under a Proxmox LXC. Host networking is
+  required because SIP carries addresses inside the message body.
+
+## Environment / tooling decisions
+
+- A repo-local `NuGet.config` maps all packages to nuget.org. Without it, machines with a restrictive
+  user-level package source mapping fail package restore with NU1100.
+- `Microsoft.OpenApi` is pinned to **2.x**: the `Microsoft.AspNetCore.OpenApi` source generator compiles
+  against the 2.x object model and fails with CS0200 on 3.x.
+- Transitive packages with known advisories are pinned to patched versions.
+- `dotnet-ef` is installed via the `dotnet-tools.json` manifest.
 
 ## Validation status
 
 - Phase 0: validated (build, tests, boot, migration, `/health`).
-- Phase 1: **validated end to end over the real Telnyx trunk** — INVITE received, caller classified,
-  answered, held, hung up, `Call` + `CallLeg` persisted. Also still passes against a local scripted caller.
-- 21 unit tests passing.
-- Nothing committed to git yet.
+- Phase 1: validated end to end over a real trunk.
+- Phase 2: validated by phone — prompt audible, DTMF detected, all three outcomes persisted correctly.
+- Unit tests: 34 passing.

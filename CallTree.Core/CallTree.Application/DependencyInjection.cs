@@ -9,6 +9,9 @@ public static class DependencyInjection
     {
         services.AddScoped<CallLifecycleService>();
 
+        // Singleton: it holds only the scope factory and opens a scope per command.
+        services.AddSingleton<ICallCommands, ScopedCallCommands>();
+
         return services;
     }
 }

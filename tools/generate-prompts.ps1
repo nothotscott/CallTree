@@ -1,9 +1,9 @@
 <#
   Regenerates the IVR prompt WAVs with the Windows speech synthesiser.
 
-  These are PLACEHOLDERS. The wording — especially the recording disclosure — is an open decision:
-  Florida is an all-party consent state, so what the caller is told, and when, is a legal choice that
-  has not been made yet. Edit $prompts below and re-run once it has been.
+  These are PLACEHOLDERS. The wording — especially the recording disclosure — is an open decision.
+  Recording law varies by jurisdiction and several require every party to a call to consent, so what the
+  caller is told, and when, is a legal choice for whoever runs this. Edit $prompts below and re-run.
 
   Output format is 8 kHz / 16-bit / mono PCM, which is exactly what G.711 carries: no resampling on the
   way out, and PromptLibrary rejects anything else rather than playing it as noise.

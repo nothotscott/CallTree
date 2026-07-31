@@ -1,0 +1,35 @@
+# CallTree on a Docker host (e.g. a Proxmox LXC).
+#
+#   cp .env.example .env      # then fill it in
+#   docker compose up -d
+#
+# Host networking is deliberate. SIP carries addresses and ports *inside* the message body (the SDP), so
+# a bridge network's NAT rewrites the packets but not the payload, and you get calls that connect with no
+# audio. Host networking also avoids mapping the whole RTP port range one port at a time.
+
+services:
+  calltree:
+    # Override in .env if you publish to your own registry: CALLTREE_IMAGE=ghcr.io/you/calltree:latest
+    image: ${CALLTREE_IMAGE:-ghcr.io/nothotscott/calltree:latest}
+    # To build locally instead of pulling, comment out `image:` above and uncomment:
+    # build:
+    #   context: ..
+    #   dockerfile: deploy/Dockerfile
+    container_name: calltree
+    restart: unless-stopped
+    network_mode: host
+    env_file: .env
+    environment:
+      ASPNETCORE_ENVIRONMENT: Production
+    volumes:
+      # SQLite database and recordings. Back up by copying this directory.
+      - /srv/calltree/data:/data
+      # Prompt WAVs. Bind-mounting them lets you change the wording without rebuilding the image;
+      # drop this line to use the prompts baked in at build time.
+      - /srv/calltree/prompts:/app/prompts
+    healthcheck:
+      test: ["CMD", "sh", "-c", "wget -qO- http://127.0.0.1:8080/health || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s

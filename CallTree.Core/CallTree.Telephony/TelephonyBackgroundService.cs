@@ -4,7 +4,6 @@ using CallTree.Domain.Calls;
 using CallTree.Domain.ValueObjects;
 using CallTree.Telephony.Audio;
 using CallTree.Telephony.Configuration;
-using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
@@ -25,7 +24,7 @@ public class TelephonyBackgroundService(
     IOptions<TrunkOptions> trunkOptions,
     IOptions<TelephonyOptions> telephonyOptions,
     PromptLibrary prompts,
-    IServiceScopeFactory scopeFactory,
+    ICallCommands calls,
     ILoggerFactory loggerFactory) : BackgroundService
 {
     private static readonly TimeSpan Phase1HoldDuration = TimeSpan.FromSeconds(5);
@@ -257,8 +256,9 @@ public class TelephonyBackgroundService(
         Guid callId;
         try
         {
-            callId = await WithLifecycleAsync(lifecycle => lifecycle.StartAsync(
-                source, classification, callerNumber, rawCallerId, request.Header.CallId, DateTimeOffset.UtcNow, stoppingToken));
+            callId = await calls.StartAsync(
+                new StartCall(source, classification, callerNumber, rawCallerId, request.Header.CallId, DateTimeOffset.UtcNow),
+                stoppingToken);
         }
         catch (Exception ex)
         {
@@ -268,7 +268,7 @@ public class TelephonyBackgroundService(
 
         // Guard so the remote-BYE, screening and local-hangup paths can't each record an ending.
         var ended = 0;
-        async Task EndOnceAsync(Func<CallLifecycleService, Task> record, string description)
+        async Task EndOnceAsync(CallCommand command, string description)
         {
             if (Interlocked.Exchange(ref ended, 1) == 1)
             {
@@ -278,11 +278,7 @@ public class TelephonyBackgroundService(
             _logger.LogInformation("Call {CallId} ended: {Description}", callId, description);
             try
             {
-                await WithLifecycleAsync(async lifecycle =>
-                {
-                    await record(lifecycle);
-                    return 0;
-                });
+                await calls.ExecuteAsync(command);
             }
             catch (Exception ex)
             {
@@ -291,7 +287,7 @@ public class TelephonyBackgroundService(
         }
 
         Task EndByHangupAsync(HangupInitiator initiator, string reason) => EndOnceAsync(
-            lifecycle => lifecycle.EndAsync(callId, DateTimeOffset.UtcNow, initiator, reason),
+            new EndCall(callId, DateTimeOffset.UtcNow, initiator, reason),
             $"{initiator} - {reason}");
 
         // Lets the screening gate abandon prompt playback the moment the caller drops.
@@ -321,11 +317,7 @@ public class TelephonyBackgroundService(
                 return;
             }
 
-            await WithLifecycleAsync(async lifecycle =>
-            {
-                await lifecycle.AnswerAsync(callId, DateTimeOffset.UtcNow);
-                return 0;
-            });
+            await calls.ExecuteAsync(new AnswerCall(callId, DateTimeOffset.UtcNow), stoppingToken);
 
             if (source == CallSource.Inbound)
             {
@@ -377,7 +369,7 @@ public class TelephonyBackgroundService(
         Guid callId,
         SIPUserAgent userAgent,
         AudioExtrasSource audioSource,
-        Func<Func<CallLifecycleService, Task>, string, Task> endOnceAsync,
+        Func<CallCommand, string, Task> endOnceAsync,
         CancellationToken cancellationToken)
     {
         var telephony = telephonyOptions.Value;
@@ -399,9 +391,7 @@ public class TelephonyBackgroundService(
             _ => $"screened out (no input within {telephony.ScreeningTimeoutSeconds}s)",
         };
 
-        await endOnceAsync(
-            lifecycle => lifecycle.ScreeningCompletedAsync(callId, outcome, DateTimeOffset.UtcNow, reason),
-            reason);
+        await endOnceAsync(new RecordScreeningOutcome(callId, outcome, DateTimeOffset.UtcNow, reason), reason);
     }
 
     /// <summary>
@@ -452,13 +442,6 @@ public class TelephonyBackgroundService(
             _publicAddress);
         mediaSession.AcceptRtpFromAny = true;
         return (mediaSession, audioSource);
-    }
-
-    /// <summary>Runs an operation against a scoped <see cref="CallLifecycleService"/> (one DI scope per telephony event).</summary>
-    private async Task<T> WithLifecycleAsync<T>(Func<CallLifecycleService, Task<T>> operation)
-    {
-        using var scope = scopeFactory.CreateScope();
-        return await operation(scope.ServiceProvider.GetRequiredService<CallLifecycleService>());
     }
 
     /// <summary>Answers OPTIONS keepalives (Asterisk qualify, trunk health probes) so we stay "reachable".</summary>
