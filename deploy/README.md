@@ -74,6 +74,40 @@ An LXC needs a couple of things before it can run Docker properly.
 Confirm it came up with `curl localhost:8080/health` and look for `SIP registration successful` in the
 logs. Registration failing here almost always means `Telephony__PublicHost` is wrong or unset.
 
+## On CasaOS
+
+[`casaos-compose.yml`](casaos-compose.yml) is a variant for CasaOS's **Custom Install → Import**, which
+takes a pasted Compose file. Fill in the `CHANGEME` values, paste the whole file, and install.
+
+It is a separate file rather than the same one because CasaOS's workflow rules out two things
+`docker-compose.yml` relies on:
+
+- **`env_file` cannot work.** Pasted YAML has no `.env` beside it on disk, so every setting is inline.
+  That means trunk credentials are stored in the app's Compose file under `/var/lib/casaos/apps/calltree/`
+  rather than a separate secrets file — root-readable on that host, which is worth knowing.
+- **`${VAR:-default}` has nothing to substitute from**, so the image tag is literal.
+
+The file also carries `x-casaos` metadata. CasaOS uses the top-level `name` and `x-casaos.main` to work out
+which service is the app; without them the import is rejected or produces a tile whose web link goes
+nowhere. `architectures` claims **amd64 only**, because
+[`../.github/workflows/publish-container.yml`](../.github/workflows/publish-container.yml) passes no
+`platforms` list and therefore builds for the GitHub runner alone. Add `linux/arm64` there before widening
+it here.
+
+Everything in [Host networking](#host-networking-and-why) and [Router configuration](#router-configuration)
+still applies — CasaOS is a management layer over the same Docker daemon, and `network_mode: host` behaves
+identically underneath it.
+
+Two things to watch:
+
+- **The prompts mount is commented out on purpose.** Bind-mounting an empty directory over `/app/prompts`
+  hides the WAVs baked into the image, and the IVR then answers calls in silence. That failure looks like
+  success — signalling works, the call connects — right up until nobody hears the press-a-digit
+  instruction. Copy the WAVs into `/DATA/AppData/calltree/prompts` first, then uncomment.
+- **Only one instance may register at a time.** If you were previously running CallTree elsewhere against
+  the same trunk credential, stop it. The provider keeps the most recent binding, so two instances mean
+  calls arriving at whichever re-registered last.
+
 ## Router configuration
 
 Forward to the LXC's address:

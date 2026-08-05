@@ -28,7 +28,8 @@ services:
       # drop this line to use the prompts baked in at build time.
       - /srv/calltree/prompts:/app/prompts
     healthcheck:
-      test: ["CMD", "sh", "-c", "wget -qO- http://127.0.0.1:8080/health || exit 1"]
+      # curl is installed by deploy/Dockerfile; the aspnet base image has no HTTP client of its own.
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/health"]
       interval: 30s
       timeout: 5s
       retries: 3

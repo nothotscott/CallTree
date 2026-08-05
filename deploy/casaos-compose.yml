@@ -1,0 +1,123 @@
+# CallTree for CasaOS.
+#
+# CasaOS installs an app by pasting a Compose file into Custom Install -> Import, so this is a
+# self-contained variant of docker-compose.yml. Two differences, both forced by that workflow:
+#
+#   - No env_file. Pasted YAML has no .env beside it on disk, so every setting is inline and you edit
+#     them in the import dialog. Trunk credentials therefore live in the app's Compose file at
+#     /var/lib/casaos/apps/calltree/ - readable by root on that host.
+#   - No ${VAR} substitution, for the same reason: there is nothing to substitute from.
+#
+# The x-casaos blocks are CasaOS's app manifest. Without a top-level `name` and `x-casaos.main` the
+# importer has no way to tell which service is the app, and the tile ends up with no working web link.
+#
+# Everything marked CHANGEME must be set before the first call will work.
+
+name: calltree
+
+services:
+  calltree:
+    image: ghcr.io/nothotscott/calltree:latest
+    container_name: calltree
+    restart: unless-stopped
+
+    # SIP carries addresses and ports inside the message body (the SDP). A bridge network rewrites packet
+    # headers but not payloads, so the container advertises an address the trunk cannot reach and you get
+    # a call that connects with no audio. Host networking also avoids publishing the RTP range one port at
+    # a time. Inside an LXC this binds to the LXC's own address.
+    network_mode: host
+
+    environment:
+      ASPNETCORE_ENVIRONMENT: Production
+
+      # --- SIP trunk ---
+      Trunk__Host: sip.example.com
+      Trunk__Port: "5060"
+      Trunk__Username: CHANGEME
+      Trunk__Password: CHANGEME
+      Trunk__RegistrationExpirySeconds: "120"
+
+      # --- Telephony ---
+      # The DID this instance owns. INVITEs addressed to anything else are rejected with a 404 before a
+      # Call row exists, which is what turns away the dial-plan probes that hit any open SIP port. Setting
+      # this is the single most useful thing you can do; leaving it blank accepts everything.
+      Telephony__DidNumber: "+15555550100"
+
+      # Calls from this number are classified as your own outbound calls rather than inbound callers.
+      Telephony__MyCellNumber: "+15555550199"
+
+      # Public IP or DDNS hostname. Mandatory behind NAT: without it the trunk is told to reach you at a
+      # LAN address, inbound INVITEs never arrive, and nothing at all is logged because they never reach
+      # the process.
+      Telephony__PublicHost: CHANGEME
+
+      Telephony__SipListenPort: "5060"
+      Telephony__RtpPortStart: "10000"
+      Telephony__RtpPortEnd: "10100"
+
+      # Digit an inbound caller must press to clear the spam gate, and how long they have.
+      Telephony__ScreeningDigit: "1"
+      Telephony__ScreeningTimeoutSeconds: "12"
+
+      # Logs complete SIP messages. Worth leaving on until the first call succeeds: the trace fires
+      # immediately after parse, so if a call fails and no trace line appears the packet never reached the
+      # process at all, which rules out the whole application in one step. Very noisy afterwards.
+      Telephony__TraceSip: "true"
+
+      # --- Logging ---
+      Logging__LogLevel__Default: Information
+      Logging__LogLevel__Microsoft.AspNetCore: Warning
+
+    volumes:
+      # SQLite database and recordings. Back up by copying this directory.
+      - /DATA/AppData/calltree/data:/data
+
+      # Prompt WAVs. Uncomment ONLY after copying greeting.wav, accepted.wav and rejected.wav in.
+      # An empty directory mounted here hides the prompts baked into the image, and the IVR then answers
+      # calls in silence - it looks like it is working right up until nobody hears the press-1 instruction.
+      # - /DATA/AppData/calltree/prompts:/app/prompts
+
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+    x-casaos:
+      ports:
+        - container: "8080"
+          description:
+            en_us: HTTP API and the /health endpoint.
+        - container: "5060"
+          description:
+            en_us: SIP signalling, UDP and TCP. Restrict this by source address at your router.
+        - container: "10000-10100"
+          description:
+            en_us: RTP media. Must match Telephony__RtpPortStart/End and the router forward.
+      volumes:
+        - container: /data
+          description:
+            en_us: SQLite database and call recordings.
+
+x-casaos:
+  # publish-container.yml sets no platforms list, so it builds for the GitHub runner only. Add
+  # linux/arm64 there before claiming arm64 here.
+  architectures:
+    - amd64
+  main: calltree
+  category: Network
+  title:
+    en_us: CallTree
+  tagline:
+    en_us: Self-hosted call recorder and bridge PBX.
+  description:
+    en_us: >-
+      A from-scratch SIP user agent embedded in an ASP.NET Core backend, owning a single DID on a SIP
+      trunk. Screens inbound callers behind a press-a-digit gate, bridges them to your mobile, and records
+      the conversation. Requires a SIP trunk and a publicly reachable address. Recording consent law
+      varies by jurisdiction - read the project README before deploying.
+  index: /health
+  port_map: "8080"
+  scheme: http
+  store_app_id: calltree

@@ -164,10 +164,15 @@ audio that is very hard to diagnose.
 
 ## Deployment
 
-A Dockerfile, Compose file and a GitHub Actions workflow that publishes to the GitHub Container Registry
+A Dockerfile, Compose files and a GitHub Actions workflow that publishes to the GitHub Container Registry
 are in [`deploy/`](deploy/), along with notes on running under a Proxmox LXC. The container uses host
 networking — SIP embeds addresses in the message body, so bridge NAT breaks media in ways that are
 tedious to debug.
+
+**CasaOS** is supported directly: [`deploy/casaos-compose.yml`](deploy/casaos-compose.yml) is written for
+its **Custom Install → Import** dialog. Fill in the `CHANGEME` values and paste the file. It is a separate
+variant because pasted YAML has no `.env` beside it, so every setting is inline; see
+[`deploy/README.md`](deploy/README.md#on-casaos) for what that implies for credential storage.
 
 ## Project layout
 

@@ -27,6 +27,13 @@ WORKDIR /app
 # Telephony:SipListenPort above 1024 and translate the port at the router instead.
 USER root
 
+# The aspnet image is Debian slim, which ships no HTTP client at all. The Compose healthcheck needs one,
+# and a healthcheck that cannot run does not fail loudly - the container simply sits permanently
+# "unhealthy", which reads as a broken deployment. Install it rather than depend on what the base carries.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends curl \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY --from=build /app .
 
 # Runtime data lives on volumes so it survives image upgrades. SQLite will not create these itself —

@@ -32,7 +32,7 @@ recording), which is blocked on the consent-disclosure decision — see the lega
 CallTree/
 ├── NuGet.config             # repo-local; maps all packages to nuget.org
 ├── dotnet-tools.json        # local dotnet-ef
-├── deploy/                  # Dockerfile, compose, Proxmox notes, firewall allowlists
+├── deploy/                  # Dockerfile, compose (+ CasaOS variant), Proxmox notes, firewall allowlists
 ├── tools/                   # generate-prompts.ps1
 ├── CallTree.Core/           # backend (.NET 10, CallTree.Core.slnx)
 │   ├── CallTree.Domain/         # aggregates, VOs, enums, domain events — no dependencies
@@ -79,6 +79,7 @@ Secrets (Development) go in user secrets, not appsettings — see README.md for 
 Frontend (`CallTree.UI/`): pnpm (`pnpm dev`, `pnpm build`, `pnpm lint`).
 Prompts: `powershell -ExecutionPolicy Bypass -File tools/generate-prompts.ps1` (from the repo root).
 Container: `docker build -f deploy/Dockerfile -t calltree .` (build context is the repo root).
+Deployment targets: plain Compose (`deploy/docker-compose.yml`) and CasaOS (`deploy/casaos-compose.yml`).
 
 ## Gotchas (hard-won — don't rediscover these)
 
@@ -135,6 +136,15 @@ Container: `docker build -f deploy/Dockerfile -t calltree .` (build context is t
   touching startup.
 - Runtime data (`CallTree.Api/data/` — db + recordings) is gitignored; recordings root is config
   (`Storage:RecordingsRoot`).
+- **Bind-mounting an empty directory over `/app/prompts` hides the prompts baked into the image** and the
+  IVR answers calls in silence — `PromptLibrary` logs a warning and carries on. Signalling still succeeds,
+  so it reads as working until nobody hears the press-1 instruction. Both compose files ship with that
+  mount present-but-commented for this reason; don't "tidy" it back on.
+- **The `aspnet:10.0` base image is Debian slim and has no HTTP client** — no curl, no wget. The Dockerfile
+  installs curl solely so the compose healthcheck has something to run; a healthcheck whose binary is
+  missing doesn't error, it just leaves the container permanently `unhealthy`.
+- **Only one instance may hold the trunk registration.** The provider keeps the most recent binding, so a
+  second instance on the same credential silently steals inbound calls. Stop the old one before deploying.
 - **Legal: recording consent varies by jurisdiction**, and several require *all* parties to consent rather
   than one. The disclosure approach is an open decision for the operator — never silently drop or
   "simplify away" disclosure prompts or tones once they exist, and never assume one jurisdiction's rules.
