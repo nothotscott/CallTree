@@ -1,11 +1,16 @@
 # CallTree — Remaining Work
 
-Ordered by build phase; each phase is validated with real phone calls before the next one starts.
+Ordered by build phase; each telephony phase is validated with real phone calls before the next one starts.
 Completed work is in [PROGRESS.md](PROGRESS.md); the project overview is in [README.md](README.md).
+
+**Phases are not being worked in numeric order.** Frontend work (Phase 8) has been brought forward ahead of
+Phase 3. The numbers stay as they are because they are referenced throughout these documents; treat them as
+labels, not a schedule. Phase 7's REST API is the UI's data source, so until it exists the UI has nothing
+real to render.
 
 ## Immediate
 
-- [ ] Choose and add a **licence**. Until then default copyright applies and nobody else may use this.
+- [x] Choose and add a **licence** — MIT, in [LICENSE.md](LICENSE.md).
 - [ ] Decide the **consent disclosure wording** and regenerate the prompts with
       `tools/generate-prompts.ps1`. The current greeting ("This call will be recorded") is a placeholder
       chosen to err toward disclosing. Recording law varies by jurisdiction and several require *all*
@@ -70,18 +75,35 @@ Completed work is in [PROGRESS.md](PROGRESS.md); the project overview is in [REA
 - [ ] `Telephony:PublicHost` is a static value. Residential IPs change; switch to a DDNS hostname or
       discover the public address at startup via SIPSorcery's `STUNClient` and re-check it periodically.
 
-## Phase 7 — REST API
+## Phase 7 — REST API (started, out of order)
 
-- [ ] List and filter calls (source, date range, number, duration), plus a call detail endpoint.
+- [x] `GET /api/calls` — paginated list, most recent first, filterable by source and status.
+- [ ] Remaining filters: date range, number, duration.
+- [ ] Call detail endpoint (`GET /api/calls/{id}`) exposing the legs, which the list summary flattens away.
 - [ ] Stream recordings with HTTP range support so playback can seek.
-- [ ] Decide the auth posture: LAN-only, or authenticated remote access.
+- [ ] Decide the auth posture: LAN-only, or authenticated remote access. **There is currently no auth and
+      no CORS policy**; the API is reachable by anything that can reach the port.
 
-## Phase 8 — Frontend
+## Phase 8 — Frontend (in progress, out of order)
 
-- [ ] Next.js recordings browser and player. Read the guides under `CallTree.UI/node_modules/next/dist/docs/`
-      first — the installed version has breaking changes relative to older conventions.
-- [ ] Dockerfile for the frontend (Next standalone output) and add it to the Compose file. The backend
-      container already exists in [`deploy/`](deploy/).
+The stack is **SvelteKit** (Svelte 5, TypeScript, Tailwind 4). It replaced the original Next.js scaffold on
+2026-08-05; nothing had been built on that scaffold, so there was no migration to do. See
+[`CallTree.UI/AGENTS.md`](CallTree.UI/AGENTS.md) for the conventions that differ from what most tutorials
+show.
+
+- [x] Scaffold the project (`sv create`, minimal template, prettier + eslint + tailwind).
+- [x] Call log at `/calls`: paginated table, source and status filters, filter state in the URL. Reads
+      `GET /api/calls` through the Vite dev proxy, so it is same-origin with no CORS.
+- [ ] Call detail view, once the detail endpoint exists.
+- [ ] Recording player, once Phase 3 produces recordings.
+- [x] Decide how the UI reaches the API in production: **same-origin**, served by the ASP.NET host from
+      `wwwroot`. No CORS policy exists or is needed. Revisit only if SSR becomes worth a second container.
+- [x] Replace `@sveltejs/adapter-auto` with a concrete adapter — now `adapter-static` in SPA mode.
+- [x] Ship the UI inside the existing backend image rather than a second container: `deploy/Dockerfile`
+      builds it in a Node stage and copies it into the API's `wwwroot`. One port, one origin, no CORS.
+- [ ] Recordings browser and player, once Phase 7 exposes the data.
+- [ ] Dockerfile for the frontend and add it to the Compose file. The backend container already exists in
+      [`deploy/`](deploy/); the CasaOS variant will need the extra service too.
 - [ ] Retention policy: keep forever, delete after N days, or cap by size? Optionally transcode older
       recordings to Opus or MP3. Stereo PCM WAV runs about 1.9 MB per minute.
 
@@ -92,5 +114,5 @@ Completed work is in [PROGRESS.md](PROGRESS.md); the project overview is in [REA
    given how easily caller ID is spoofed.
 3. Retention policy — Phase 8.
 4. API and UI exposure and authentication — Phases 7–8. Recordings are sensitive; the default posture is
-   LAN-only with no external exposure.
-5. Licence.
+   LAN-only with no external exposure. Note the UI and API now share one port, so exposing one exposes
+   the other — there is no arrangement where the browser reaches the UI but not `/api`.

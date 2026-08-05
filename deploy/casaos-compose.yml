@@ -1,5 +1,8 @@
 # CallTree for CasaOS.
 #
+# One container serves everything: the web UI, the API under /api, and SIP/RTP. The UI is built into
+# the image as static files, so there is no second service and no CORS to configure.
+#
 # CasaOS installs an app by pasting a Compose file into Custom Install -> Import, so this is a
 # self-contained variant of docker-compose.yml. Two differences, both forced by that workflow:
 #
@@ -88,7 +91,7 @@ services:
       ports:
         - container: "8080"
           description:
-            en_us: HTTP API and the /health endpoint.
+            en_us: Web UI, the HTTP API under /api, and the /health endpoint. All one origin.
         - container: "5060"
           description:
             en_us: SIP signalling, UDP and TCP. Restrict this by source address at your router.
@@ -117,7 +120,8 @@ x-casaos:
       trunk. Screens inbound callers behind a press-a-digit gate, bridges them to your mobile, and records
       the conversation. Requires a SIP trunk and a publicly reachable address. Recording consent law
       varies by jurisdiction - read the project README before deploying.
-  index: /health
+  # The tile opens the web UI. It was /health while the image had no frontend in it.
+  index: /
   port_map: "8080"
   scheme: http
   store_app_id: calltree

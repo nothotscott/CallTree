@@ -8,6 +8,13 @@ public class CallTreeDbContext(DbContextOptions<CallTreeDbContext> options) : Db
 {
     public DbSet<Call> Calls => Set<Call>();
 
+    protected override void ConfigureConventions(ModelConfigurationBuilder configurationBuilder)
+    {
+        // Applies to every DateTimeOffset in the model, nullable ones included. See the converter for
+        // why: without it SQLite cannot ORDER BY or range-filter any of our timestamps.
+        configurationBuilder.Properties<DateTimeOffset>().HaveConversion<UtcDateTimeOffsetConverter>();
+    }
+
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
         modelBuilder.Entity<Call>(call =>

@@ -3,6 +3,9 @@
 #   cp .env.example .env      # then fill it in
 #   docker compose up -d
 #
+# One service, not two: the web UI is built into the image as static files and served by the API on
+# port 8080, same origin as /api. Browse it at http://<host>:8080/.
+#
 # Host networking is deliberate. SIP carries addresses and ports *inside* the message body (the SDP), so
 # a bridge network's NAT rewrites the packets but not the payload, and you get calls that connect with no
 # audio. Host networking also avoids mapping the whole RTP port range one port at a time.

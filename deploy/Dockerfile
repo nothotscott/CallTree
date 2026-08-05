@@ -1,5 +1,23 @@
 # Build context is the repository root, not this directory:
 #   docker build -f deploy/Dockerfile -t calltree .
+#
+# One image serves both halves. The SvelteKit UI is built to static files here and copied into the
+# API's wwwroot, so the browser talks to a single origin on a single port and there is no CORS to
+# configure and no second container to deploy. See deploy/README.md.
+
+FROM node:22-alpine AS ui
+WORKDIR /ui
+
+# pnpm pinned rather than taken from corepack's default: the lockfile is v9 and a different major
+# would rewrite it or refuse --frozen-lockfile.
+RUN npm install --global pnpm@10
+
+# Manifests first so the dependency layer survives edits to the UI source.
+COPY CallTree.UI/package.json CallTree.UI/pnpm-lock.yaml CallTree.UI/pnpm-workspace.yaml CallTree.UI/.npmrc ./
+RUN pnpm install --frozen-lockfile
+
+COPY CallTree.UI/ ./
+RUN pnpm build
 
 FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
 WORKDIR /src
@@ -35,6 +53,10 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=build /app .
+
+# The UI. ASP.NET serves wwwroot as static files and falls back to index.html for unmatched paths,
+# which is what makes deep links like /calls work on a first load rather than only from inside the app.
+COPY --from=ui /ui/build ./wwwroot
 
 # Runtime data lives on volumes so it survives image upgrades. SQLite will not create these itself —
 # Program.EnsureDatabase does, but the mount has to be writable.

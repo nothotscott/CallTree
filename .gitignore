@@ -25,9 +25,9 @@
 # testing
 **/coverage
 
-# next.js
-**/.next/
-**/out/
+# sveltekit
+**/.svelte-kit/
+**/.output/
 
 # production
 **/build
@@ -47,7 +47,9 @@
 
 # typescript
 *.tsbuildinfo
-**/next-env.d.ts
 
 # CallTree runtime data (SQLite db + recordings)
 CallTree.Core/CallTree.Api/data/
+
+# UI build output, copied into the image by deploy/Dockerfile
+CallTree.Core/CallTree.Api/wwwroot/

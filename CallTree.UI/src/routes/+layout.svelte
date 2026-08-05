@@ -1,9 +1,24 @@
 <script lang="ts">
 	import './layout.css';
 	import favicon from '$lib/assets/favicon.svg';
+	import { resolve } from '$app/paths';
 
 	let { children } = $props();
 </script>
 
 <svelte:head><link rel="icon" href={favicon} /></svelte:head>
-{@render children()}
+
+<div class="min-h-screen bg-slate-50 text-slate-900">
+	<header class="border-b border-slate-200 bg-white">
+		<div class="mx-auto flex max-w-6xl items-center gap-6 px-6 py-4">
+			<a href={resolve('/calls')} class="text-lg font-semibold tracking-tight">CallTree</a>
+			<nav class="text-sm text-slate-600">
+				<a href={resolve('/calls')} class="hover:text-slate-900">Calls</a>
+			</nav>
+		</div>
+	</header>
+
+	<main class="mx-auto max-w-6xl px-6 py-8">
+		{@render children()}
+	</main>
+</div>

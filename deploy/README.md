@@ -22,6 +22,20 @@ To build locally instead, from the repository root:
 docker build -f deploy/Dockerfile -t calltree .
 ```
 
+## One image, both halves
+
+The image contains the backend **and** the web UI. `deploy/Dockerfile` builds the SvelteKit app to static
+files in a Node stage and copies them into the API's `wwwroot`; ASP.NET serves them and falls back to
+`index.html` for unmatched paths, so deep links like `/calls` work on a first load.
+
+That means one container, one port, and one origin — so there is no CORS policy to configure and no second
+service to deploy. The UI is at `http://<host>:8080/`, the API under `/api`, on the same port.
+
+The cost is that the UI is a single-page app with no server-side rendering: `@sveltejs/adapter-static`
+emits one fallback document and routing happens in the browser. For a LAN-only call log that is invisible.
+If you ever want SSR, that is the point at which a second container (`adapter-node`) starts to earn its
+keep — and it would need CORS or a reverse proxy in front of both.
+
 ## Host networking, and why
 
 `docker-compose.yml` sets `network_mode: host`. This is not laziness:

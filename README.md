@@ -10,7 +10,8 @@ you want a fully featured PBX, use a fully featured PBX.
 
 > **Status: in development.** Phases 0–2 are complete and validated over a real trunk — registration,
 > inbound signalling, prompt playback and the DTMF screening gate all work. Recording (Phase 3) and
-> bridging (Phase 4) are not implemented yet. See [PROGRESS.md](PROGRESS.md) and [TODO.md](TODO.md).
+> bridging (Phase 4) are not implemented yet. The SvelteKit web UI shows a browsable call log. See
+> [PROGRESS.md](PROGRESS.md) and [TODO.md](TODO.md).
 
 ## How it works
 
@@ -32,7 +33,7 @@ Both start life as inbound SIP INVITEs — `Outbound`/`Inbound` describe the *bu
 - A SIP trunk with a DID. Any provider supporting credential registration and PCMU should work; Telnyx is
   the one this has been exercised against.
 - A publicly reachable IP or DDNS hostname, with UDP 5060 and an RTP port range forwarded.
-- Node.js and pnpm, only if you want to work on the (as-yet unbuilt) web UI.
+- Node.js and pnpm, only if you want to work on the web UI (SvelteKit; scaffolded, no features yet).
 
 ## Quick start
 
@@ -169,10 +170,43 @@ are in [`deploy/`](deploy/), along with notes on running under a Proxmox LXC. Th
 networking — SIP embeds addresses in the message body, so bridge NAT breaks media in ways that are
 tedious to debug.
 
+**One image contains both halves.** The web UI is built to static files and served by the ASP.NET host, so
+there is no separate frontend container, no second port, and no CORS to configure — browse it at
+`http://<host>:8080/`.
+
 **CasaOS** is supported directly: [`deploy/casaos-compose.yml`](deploy/casaos-compose.yml) is written for
 its **Custom Install → Import** dialog. Fill in the `CHANGEME` values and paste the file. It is a separate
 variant because pasted YAML has no `.env` beside it, so every setting is inline; see
 [`deploy/README.md`](deploy/README.md#on-casaos) for what that implies for credential storage.
+
+## Web UI and API
+
+The backend exposes a read-only call log, and the SvelteKit frontend in
+[`CallTree.UI/`](CallTree.UI/) browses it. Run the two together:
+
+```bash
+dotnet run --project CallTree.Api    # from CallTree.Core/, serves the API on :5146
+pnpm dev                             # from CallTree.UI/, serves the UI on :5173
+```
+
+Vite proxies `/api` to the backend, so the browser sees a single origin and there is no CORS to configure.
+The UI is at <http://localhost:5173/calls>.
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /api/calls` | Paginated call log, most recent first |
+| `GET /health` | Liveness |
+
+`GET /api/calls` accepts `page` (1-based), `pageSize` (default 25, capped at 200), `source`
+(`Inbound`/`Outbound`) and `status`. Out-of-range paging is clamped rather than rejected; an unrecognised
+enum name is a 400. Enums are serialized as names. The response carries `items` plus `page`, `pageSize`,
+`totalCount`, `totalPages`, `hasPreviousPage` and `hasNextPage`.
+
+> **There is no authentication on the API.** The assumed posture is LAN-only, and call records are
+> sensitive. Decide the auth story before exposing it — see [TODO.md](TODO.md).
+
+To work on the UI without disturbing a live deployment, leave `Trunk:Host` unset: telephony logs
+`telephony is idle` and never registers, so whichever instance owns the trunk keeps it.
 
 ## Project layout
 
@@ -185,7 +219,7 @@ CallTree/
 │   ├── CallTree.Telephony/        # SIPSorcery + NAudio; owns the SIP user agent
 │   ├── CallTree.Api/              # ASP.NET Core host, DI wiring, /health
 │   └── CallTree.Tests/            # xUnit; pure logic only
-├── CallTree.UI/                 # Next.js frontend (not started)
+├── CallTree.UI/                 # SvelteKit frontend (call log)
 ├── deploy/                      # Dockerfile, Compose, firewall lists
 └── tools/                       # Prompt generation
 ```
@@ -223,8 +257,7 @@ are working without needing a second phone.
 
 ## Licence
 
-No licence has been chosen yet — until one is added, default copyright applies and others have no rights to
-use this. Pick one before publishing.
+[MIT](LICENSE.md).
 
 ## Acknowledgements
 

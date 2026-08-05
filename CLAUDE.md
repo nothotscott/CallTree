@@ -21,10 +21,15 @@ Naming note: `Outbound`/`Inbound` are **business** classifications; both start a
 
 ## Status
 
-Phases 0–2 complete and validated by real phone calls. Next is Phase 3 (Outbound-source path + mono
-recording), which is blocked on the consent-disclosure decision — see the legal note below.
+Phases 0–2 complete and validated by real phone calls. Phase 3 (Outbound-source path + mono recording) is
+the next *telephony* phase and is blocked on the consent-disclosure decision — see the legal note below.
 
-**Workflow rule: one phase at a time.** The maintainer validates each phase by phone before the next begins.
+**Current work is the frontend, taken ahead of Phase 3 deliberately.** Phase numbers are not being
+renumbered; they are referenced throughout TODO/PROGRESS. Note that a recordings browser needs Phase 7's
+REST API to have anything to show, so UI work runs ahead of its own data source until that lands.
+
+**Workflow rule: one phase at a time.** The maintainer validates each telephony phase by phone before the
+next begins.
 
 ## Solution layout
 
@@ -41,7 +46,7 @@ CallTree/
 │   ├── CallTree.Telephony/      # SIPSorcery + NAudio; TelephonyBackgroundService owns the SIP UA
 │   ├── CallTree.Api/            # ASP.NET Core host; DI wiring; /health; Scalar at /scalar (dev)
 │   └── CallTree.Tests/          # xUnit v3 — pure-logic tests only (state machine, PhoneNumber, WAV logic)
-└── CallTree.UI/             # Next.js frontend (has its own CLAUDE.md/AGENTS.md — read them)
+└── CallTree.UI/             # SvelteKit frontend (has its own CLAUDE.md/AGENTS.md — read them)
 ```
 
 Dependency direction: `Api → {Telephony, Infrastructure} → Application → Domain`.
@@ -58,6 +63,9 @@ Dependency direction: `Api → {Telephony, Infrastructure} → Application → D
   scoped and telephony callbacks are long-lived, so there is no ambient scope to join — but that plumbing
   belongs in one place, not at every call site.
 - "Recording" is a fact (`Recording` entity), never a `CallStatus`.
+- **Reads and writes use separate ports.** `ICallRepository` loads whole aggregates to mutate and save;
+  `ICallQueries` returns flat, untracked read models (`CallSummary`) for display. API responses are read
+  models, never the aggregate — exposing `Call` would freeze the transition surface into the HTTP contract.
 - Bridging (RTP payload relay) and recording (decoded PCM tap) are separate concerns — don't conflate.
 - Enums persist as strings; timestamps are `DateTimeOffset` passed explicitly into domain methods (testability).
 - Trunk credentials/config live in options bound from configuration, never in the DB or the domain.
@@ -76,10 +84,20 @@ dotnet ef migrations add <Name> --project CallTree.Infrastructure --startup-proj
 ```
 
 Secrets (Development) go in user secrets, not appsettings — see README.md for the full list.
-Frontend (`CallTree.UI/`): pnpm (`pnpm dev`, `pnpm build`, `pnpm lint`).
+
+**Running the two halves together:** `dotnet run --project CallTree.Api` (http profile, port 5146) and
+`pnpm dev` in `CallTree.UI/` (port 5173). Vite proxies `/api` to 5146, so the browser sees one origin and
+there is no CORS to configure. To work on the UI without touching the phone line, leave `Trunk:Host` unset
+— `TelephonyBackgroundService` logs "telephony is idle" and never registers, so the deployed instance keeps
+the trunk binding.
+
+Frontend (`CallTree.UI/`): pnpm (`pnpm dev`, `pnpm build`, `pnpm check`, `pnpm lint`, `pnpm format`).
+`pnpm check` is the type-check (`svelte-kit sync && svelte-check`) — run it, not just `lint`.
 Prompts: `powershell -ExecutionPolicy Bypass -File tools/generate-prompts.ps1` (from the repo root).
 Container: `docker build -f deploy/Dockerfile -t calltree .` (build context is the repo root).
 Deployment targets: plain Compose (`deploy/docker-compose.yml`) and CasaOS (`deploy/casaos-compose.yml`).
+**One image contains both halves** — the Dockerfile builds the SvelteKit UI to static files in a Node
+stage and copies them into the API's `wwwroot`. One container, one port, one origin, no CORS anywhere.
 
 ## Gotchas (hard-won — don't rediscover these)
 
@@ -132,10 +150,27 @@ Deployment targets: plain Compose (`deploy/docker-compose.yml`) and CasaOS (`dep
 - A single DTMF keypress raises `OnDtmfTone` more than once (the tone spans several RTP packets). Latch the
   first tone or you will process one keypress as several.
 - Keep log message strings ASCII. Em-dashes render as mojibake in consoles that aren't UTF-8.
+- **SQLite cannot ORDER BY a `DateTimeOffset`**, and every timestamp in this project is one. EF throws
+  outright on ordering ("SQLite does not support expressions of type 'DateTimeOffset' in ORDER BY
+  clauses") because rows written with different UTC offsets would not sort by instant; range filters have
+  the same flaw but fail *silently*. `UtcDateTimeOffsetConverter` (applied to every `DateTimeOffset` via
+  `ConfigureConventions`) normalizes to UTC and stores text in EF's own format, so ordering and
+  comparison work and existing rows are byte-identical — no migration. Don't remove it to "simplify" the
+  mapping, and don't add a second timestamp column to sort by instead.
 - SQLite won't create missing parent directories — `Program.EnsureDatabase` handles it; keep that when
   touching startup.
 - Runtime data (`CallTree.Api/data/` — db + recordings) is gitignored; recordings root is config
   (`Storage:RecordingsRoot`).
+- **Never let a locally staged `wwwroot` reach the Docker build.** `.dockerignore` excludes
+  `CallTree.Core/CallTree.Api/wwwroot/` for a reason: if it arrives in the build stage, `dotnet publish`
+  precompresses it to `.br`/`.gz`, and those survive the later `COPY` of the freshly built UI — `COPY`
+  overwrites files but never removes them. The container then serves a stale compressed copy to any
+  browser sending `Accept-Encoding`, while an uncompressed `curl` sees the correct page. Observed once
+  already; that is why the exclusion is there.
+- **The SPA fallback must not swallow `/api`.** `MapFallbackToFile` catches everything, so an unknown API
+  path would answer `200 text/html` and callers would fail later at `JSON.parse` instead of seeing a 404.
+  `app.Map("/api/{**path}", ...)` returns a proper 404 ahead of the fallback; controllers are more
+  specific and still match first.
 - **Bind-mounting an empty directory over `/app/prompts` hides the prompts baked into the image** and the
   IVR answers calls in silence — `PromptLibrary` logs a warning and carries on. Signalling still succeeds,
   so it reads as working until nobody hears the press-1 instruction. Both compose files ship with that

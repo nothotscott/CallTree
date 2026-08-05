@@ -16,6 +16,7 @@ public static class DependencyInjection
 
         services.AddDbContext<CallTreeDbContext>(options => options.UseSqlite(connectionString));
         services.AddScoped<ICallRepository, CallRepository>();
+        services.AddScoped<ICallQueries, CallQueries>();
         services.Configure<StorageOptions>(configuration.GetSection(StorageOptions.SectionName));
 
         return services;

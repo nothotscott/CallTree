@@ -1,42 +1,65 @@
-# sv
+# CallTree.UI
 
-Everything you need to build a Svelte project, powered by [`sv`](https://github.com/sveltejs/cli).
+The web frontend for [CallTree](../README.md) — a browser for recorded calls. Built with SvelteKit
+(Svelte 5, TypeScript, Tailwind 4).
 
-## Creating a project
-
-If you're seeing this, you've probably already done this step. Congrats!
-
-```sh
-# create a new project
-npx sv create my-app
-```
-
-To recreate this project with the same configuration:
-
-```sh
-# recreate this project
-pnpm dlx sv@0.17.0 create --template minimal --types ts --add prettier eslint tailwindcss="plugins:forms" --install pnpm CallTree.UI
-```
+> **Status: early.** The call log at `/calls` works — paginated, filterable by source and status. A
+> recording player needs recordings, which the backend does not produce yet (Phase 3); a call detail view
+> needs a detail endpoint. See [`../TODO.md`](../TODO.md).
+>
+> This is a single-page app with no server-side rendering, so there is no `+page.server.ts` and no form
+> actions — see [AGENTS.md](AGENTS.md#how-this-ships).
 
 ## Developing
 
-Once you've created a project and installed dependencies with `npm install` (or `pnpm install` or `yarn`), start a development server:
+```sh
+pnpm install
+pnpm dev          # or: pnpm dev --open
+```
+
+The backend runs separately, from `../CallTree.Core`:
 
 ```sh
-npm run dev
-
-# or start the server and open the app in a new browser tab
-npm run dev -- --open
+dotnet run --project CallTree.Api
 ```
+
+Vite proxies `/api` to it on port 5146, so there is no CORS to configure. The UI is at
+<http://localhost:5173/calls>.
+
+If you are working against a machine that owns a live SIP trunk, leave `Trunk:Host` unset so the backend
+does not register and steal inbound calls from the real deployment.
+
+## Checks
+
+```sh
+pnpm check        # type-check (svelte-kit sync && svelte-check)
+pnpm lint         # prettier + eslint
+pnpm format       # apply prettier
+```
+
+`pnpm lint` does not type-check — run `pnpm check` before considering a change done.
 
 ## Building
 
-To create a production version of your app:
-
 ```sh
-npm run build
+pnpm build
+pnpm preview
 ```
 
-You can preview the production build with `npm run preview`.
+`pnpm build` writes static files to `build/` via `@sveltejs/adapter-static` in SPA mode. In deployment
+those files are copied into the ASP.NET host's `wwwroot` by `deploy/Dockerfile`, so the UI and the API ship
+as one container on one port — there is no separate frontend image and no CORS to configure.
 
-> To deploy your app, you may need to install an [adapter](https://svelte.dev/docs/kit/adapters) for your target environment.
+## Notes for contributors and agents
+
+Conventions in this scaffold that differ from most published Svelte material — config living in
+`vite.config.ts` rather than `svelte.config.js`, forced runes mode, CSS-configured Tailwind — are written
+up in [AGENTS.md](AGENTS.md).
+
+## Regenerating the scaffold
+
+For reference, the project was created with:
+
+```sh
+pnpm dlx sv@0.17.0 create --template minimal --types ts --add prettier eslint tailwindcss="plugins:forms" --install pnpm CallTree.UI
+```
