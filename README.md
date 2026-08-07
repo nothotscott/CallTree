@@ -205,8 +205,8 @@ Compose file on that host. See [`deploy/README.md`](deploy/README.md#on-casaos).
 
 ## Web UI and API
 
-The backend exposes a read-only call log and a settings endpoint, and the SvelteKit frontend in
-[`CallTree.UI/`](CallTree.UI/) provides a browser for both. Run the two together:
+The backend exposes a read-only call log, a settings endpoint and a telephony status endpoint; the
+SvelteKit frontend in [`CallTree.UI/`](CallTree.UI/) is the browser for all three. Run the two together:
 
 ```bash
 dotnet run --project CallTree.Api    # from CallTree.Core/, serves the API on :5146
@@ -214,13 +214,14 @@ pnpm dev                             # from CallTree.UI/, serves the UI on :5173
 ```
 
 Vite proxies `/api` to the backend, so the browser sees a single origin and there is no CORS to configure.
-The UI is at <http://localhost:5173/calls>, with settings at <http://localhost:5173/settings>.
+The UI is at <http://localhost:5173/calls>, with `/status` and `/settings` alongside it.
 
 | Endpoint | Purpose |
 |---|---|
 | `GET /api/calls` | Paginated call log, most recent first |
 | `GET /api/config` | Effective Telephony and Trunk settings |
 | `PUT /api/config` | Save them to `Storage:ConfigFile` |
+| `GET /api/telephony/status` | Trunk registration state and the SIP stack's live view |
 | `GET /health` | Liveness |
 
 `GET /api/calls` accepts `page` (1-based), `pageSize` (default 25, capped at 200), `source`
@@ -232,6 +233,13 @@ The config endpoints never return the trunk password — only `trunkPasswordSet`
 `trunkPassword` leaves the configured one alone, so the UI can save an unrelated field without ever
 holding the secret. The response also reports `pendingRestartKeys` (saved, but the running SIP stack is
 still on the old value), `restartOnlyKeys` and `environmentOverrides`.
+
+`GET /api/telephony/status` answers "is the trunk up, and if not, why not" without reading the log. It
+carries the registration state and the registrar's own failure message, plus the things that otherwise
+fail identically — as a caller hearing a busy tone with nothing logged at all: the Contact the registrar
+echoed back (the address it will actually dial), what we advertise in `Contact` and SDP, the bound SIP
+endpoints, whether the DID filter is active, and which prompts loaded. The page at `/status` polls it
+and raises each of those as a warning in its own right.
 
 > **There is no authentication on the API.** The assumed posture is LAN-only. This matters more now than
 > it did for the call log alone: `/api/config` discloses the DID, the mobile number, the public host and

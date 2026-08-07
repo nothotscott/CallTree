@@ -29,6 +29,9 @@ public static class PromptNames
 /// </remarks>
 public sealed class PromptLibrary
 {
+    private static readonly string[] RequiredPrompts =
+        [PromptNames.Greeting, PromptNames.Accepted, PromptNames.Rejected];
+
     private readonly Dictionary<string, PcmAudio> _prompts = new(StringComparer.OrdinalIgnoreCase);
     private readonly ILogger<PromptLibrary> _logger;
 
@@ -47,6 +50,16 @@ public sealed class PromptLibrary
     }
 
     public string Root { get; }
+
+    /// <summary>Prompts that loaded, in name order.</summary>
+    public IReadOnlyList<string> Loaded => [.. _prompts.Keys.Order()];
+
+    /// <summary>
+    /// Required prompts that did not load. Non-empty means a step of the IVR will play silence, which
+    /// looks like success from every other angle: signalling works and the call connects.
+    /// </summary>
+    public IReadOnlyList<string> Missing =>
+        [.. RequiredPrompts.Where(name => !_prompts.ContainsKey(name))];
 
     public bool TryGet(string name, out PcmAudio prompt) => _prompts.TryGetValue(name, out prompt!);
 
@@ -75,7 +88,7 @@ public sealed class PromptLibrary
             }
         }
 
-        foreach (var required in new[] { PromptNames.Greeting, PromptNames.Accepted, PromptNames.Rejected })
+        foreach (var required in RequiredPrompts)
         {
             if (!_prompts.ContainsKey(required))
             {

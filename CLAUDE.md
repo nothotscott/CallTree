@@ -141,7 +141,8 @@ stage and copies them into the API's `wwwroot`. One container, one port, one ori
   what lets tracing be turned on mid-call from the settings UI instead of via a restart that drops the
   registration and the call being investigated.
 - Registrars echo the stored binding in their `200 OK` `Contact` — the fastest way to confirm what address
-  the trunk will actually dial.
+  the trunk will actually dial. `TelephonyStatus` captures it from `RegistrationSuccessful`, so
+  `/api/telephony/status` and the `/status` page show it without going near the log.
 - Useful reachability check that needs no second phone: send a SIP `OPTIONS` to the *public* IP from the LAN.
   Many routers hairpin it back through the port-forward, so a `200 Ok` proves the forward + host firewall
   path. Note this enters on the LAN interface, so it does not exercise the WAN firewall policy.

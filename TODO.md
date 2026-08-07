@@ -66,7 +66,9 @@ real to render.
 
 ## Phase 6 — Trunk resilience
 
-- [ ] Registration resilience: backoff tuning, network-blip recovery, registration state exposed on `/health`.
+- [ ] Registration resilience: backoff tuning and network-blip recovery. Registration state is now
+      tracked in `TelephonyStatus` and exposed at `GET /api/telephony/status`; surfacing it on `/health`
+      as well would let a container orchestrator act on it, which the status page cannot.
 - [ ] `Trunk:AuthUsername` is currently warned about but not honoured. Wiring it up means moving to the long
       `SIPRegistrationUserAgent` overload (AOR, realm, contact URI, custom headers). Only needed for
       providers that split the SIP and auth usernames.
@@ -80,6 +82,8 @@ real to render.
 - [x] `GET /api/calls` — paginated list, most recent first, filterable by source and status.
 - [x] `GET`/`PUT /api/config` — read and save the Telephony and Trunk sections to a writable config
       file layered under the environment. The password is write-only.
+- [x] `GET /api/telephony/status` — trunk registration state, the registrar's failure message, the
+      Contact it echoed back, the bound endpoints, and what is advertised in Contact and SDP.
 - [ ] Remaining filters: date range, number, duration.
 - [ ] Call detail endpoint (`GET /api/calls/{id}`) exposing the legs, which the list summary flattens away.
 - [ ] Stream recordings with HTTP range support so playback can seek.
@@ -101,10 +105,13 @@ show.
       `GET /api/calls` through the Vite dev proxy, so it is same-origin with no CORS.
 - [x] Settings page at `/settings`: edits the Telephony and Trunk sections, marks the fields an
       environment variable is overriding, and reports which saved keys are waiting on a restart.
+- [x] Telephony status at `/status`: registration state, the registrar's failure message and the binding
+      it echoed back, plus warnings for the failures that otherwise present identically (no public host,
+      no DID filter, missing prompts, settings waiting on a restart). Polls every 5 s.
 - [ ] Restart the service from the UI, so a trunk change does not need shell access. Needs care: the
       process supervises itself only under Compose's `restart: unless-stopped`, and there is no auth.
-- [ ] Show trunk registration state on the settings page, once Phase 6 exposes it on `/health`. Right
-      now "did my trunk change work?" is answered by reading the log.
+- [ ] Live call state on the status page — there is no runtime call registry until Phase 4's
+      `CallSession`/`ActiveCallRegistry`, so "is a call up right now" cannot be answered yet.
 - [ ] Call detail view, once the detail endpoint exists.
 - [ ] Recording player, once Phase 3 produces recordings.
 - [x] Decide how the UI reaches the API in production: **same-origin**, served by the ASP.NET host from

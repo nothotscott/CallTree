@@ -55,6 +55,11 @@ models. Enums travel as **names**, not numbers. Data is fetched in `load` functi
 (page, filters) lives in the URL rather than component state, so views are linkable and the back button
 works.
 
+The status page (`/status`) polls `GET /api/telephony/status` on an interval from an `$effect` that
+returns its `clearInterval` — without that cleanup the timer survives navigation and keeps fetching. It
+keeps the last good reading when a poll fails rather than blanking the page, since a status page that
+goes empty on one dropped request is worse than one that says "last refresh failed".
+
 The settings page (`/settings`) is the one place that writes:
 
 - **The trunk password is write-only.** The API never sends it, only `trunkPasswordSet`. Send

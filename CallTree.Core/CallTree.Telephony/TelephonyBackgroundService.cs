@@ -4,6 +4,7 @@ using CallTree.Domain.Calls;
 using CallTree.Domain.ValueObjects;
 using CallTree.Telephony.Audio;
 using CallTree.Telephony.Configuration;
+using CallTree.Telephony.Status;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
@@ -24,6 +25,7 @@ public class TelephonyBackgroundService(
     IOptionsMonitor<TrunkOptions> trunkOptions,
     IOptionsMonitor<TelephonyOptions> telephonyOptions,
     TelephonySettingsWatcher settingsWatcher,
+    TelephonyStatus status,
     PromptLibrary prompts,
     ICallCommands calls,
     ILoggerFactory loggerFactory) : BackgroundService
@@ -97,13 +99,28 @@ public class TelephonyBackgroundService(
 
         AttachSipTracing();
 
+        var listeningEndpoints = _sipTransport.GetSIPChannels()
+            .Select(c => c.ListeningSIPEndPoint.ToString())
+            .ToList();
+
         _logger.LogInformation(
             "SIP listening on {Channels}; advertising {ContactHost} in Contact/SDP; RTP {RtpStart}-{RtpEnd}; SIP trace {TraceState}",
-            string.Join(", ", _sipTransport.GetSIPChannels().Select(c => c.ListeningSIPEndPoint.ToString())),
+            string.Join(", ", listeningEndpoints),
             _sipTransport.ContactHost is { Length: > 0 } host ? host : "(local address - NAT will break inbound calls)",
             telephony.RtpPortStart,
             telephony.RtpPortEnd,
             telephony.TraceSip ? "on" : "off");
+
+        status.Update(current => current with
+        {
+            RegistrationState = TrunkRegistrationState.Registering,
+            StartedAt = DateTimeOffset.UtcNow,
+            ListeningEndpoints = listeningEndpoints,
+            ContactHost = _sipTransport.ContactHost is { Length: > 0 } contact ? contact : null,
+            SdpAddress = _publicAddress?.ToString(),
+            RtpPortRange = $"{telephony.RtpPortStart}-{telephony.RtpPortEnd}",
+            ExpirySeconds = trunk.RegistrationExpirySeconds,
+        });
 
         // A persistent UA fields incoming INVITEs; per-leg UAs come with bridging in Phase 4.
         var listenerUserAgent = new SIPUserAgent(_sipTransport, null);
@@ -283,16 +300,57 @@ public class TelephonyBackgroundService(
             // connection, so its registration status stays empty and inbound calls have no destination.
             sendUsernameInContactHeader: true);
 
-        _registrationUserAgent.RegistrationSuccessful += (uri, _) =>
-            _logger.LogInformation("SIP registration successful for {Uri}", uri);
+        status.Update(current => current with { RegistrarServer = server });
+
+        _registrationUserAgent.RegistrationSuccessful += (uri, response) =>
+        {
+            // The registrar echoes the binding it stored in the 200 OK Contact. That is the address it
+            // will actually dial, and the quickest way to catch a NAT problem that leaves registration
+            // looking perfectly healthy from this side.
+            var contact = response?.Header?.Contact is { Count: > 0 } contacts
+                ? string.Join(", ", contacts.Select(c => c.ToString()))
+                : null;
+
+            _logger.LogInformation("SIP registration successful for {Uri}; registrar stored {Contact}", uri, contact ?? "(no contact returned)");
+            RecordRegistration(TrunkRegistrationState.Registered, uri, message: null, contact);
+        };
         _registrationUserAgent.RegistrationRemoved += (uri, _) =>
+        {
             _logger.LogWarning("SIP registration removed for {Uri}", uri);
+            RecordRegistration(TrunkRegistrationState.Removed, uri, message: null, contact: null);
+        };
         _registrationUserAgent.RegistrationTemporaryFailure += (uri, _, message) =>
+        {
             _logger.LogWarning("SIP registration temporary failure for {Uri}: {Message}", uri, message);
+            RecordRegistration(TrunkRegistrationState.TemporaryFailure, uri, message, contact: null);
+        };
         _registrationUserAgent.RegistrationFailed += (uri, _, message) =>
+        {
             _logger.LogError("SIP registration failed for {Uri}: {Message}", uri, message);
+            RecordRegistration(TrunkRegistrationState.Failed, uri, message, contact: null);
+        };
 
         _registrationUserAgent.Start();
+    }
+
+    private void RecordRegistration(TrunkRegistrationState state, SIPURI uri, string? message, string? contact)
+    {
+        var now = DateTimeOffset.UtcNow;
+
+        status.Update(current => current with
+        {
+            RegistrationState = state,
+            RegistrationMessage = message,
+            RegisteredUri = uri?.ToString() ?? current.RegisteredUri,
+            RegistrationChangedAt = now,
+            // Keep the last known binding on a later failure: "it registered at 09:12 as this contact
+            // and has been failing since" is the useful reading, not a blank field.
+            RegistrarContact = contact ?? current.RegistrarContact,
+            LastRegisteredAt = state == TrunkRegistrationState.Registered ? now : current.LastRegisteredAt,
+            RegistrationCount = state == TrunkRegistrationState.Registered
+                ? current.RegistrationCount + 1
+                : current.RegistrationCount,
+        });
     }
 
     private async Task HandleIncomingCallAsync(SIPUserAgent userAgent, SIPRequest request, CancellationToken stoppingToken)

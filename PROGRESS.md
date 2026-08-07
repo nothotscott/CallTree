@@ -164,6 +164,30 @@ variables, which is what makes a container's data volume the whole instance rath
 CasaOS in particular that removes the step where credentials are pasted into a Compose file that ends up
 root-readable at `/var/lib/casaos/apps/calltree/`.
 
+### Telephony status page
+
+`GET /api/telephony/status` and a page at `/status` that polls it every 5 seconds. Registration state
+used to exist only as four log lines, so "is the trunk up?" meant finding and reading the log.
+
+`TelephonyStatus` holds an immutable snapshot that the registration events replace wholesale — the
+events arrive on SIPSorcery's threads while the API reads on request threads, and a page showing a
+registered state next to a failure message would be worse than no page.
+
+What it shows is chosen from the bring-up faults in Phase 1, all four of which presented identically as
+a caller hearing a busy tone with nothing whatsoever in the log:
+
+- **The Contact the registrar echoed back in its 200 OK** — the address it will actually dial. This is
+  the fault that hides best: registration looks perfectly healthy locally while the binding points at a
+  LAN address or has no user part at all.
+- What we advertise in `Contact` and in SDP, separately, because they fail differently — the first
+  stops calls arriving, the second connects the call and then sends the audio nowhere.
+- The bound SIP endpoints, the RTP range, whether the DID filter is active, and which prompts loaded.
+- Settings saved but waiting on a restart, from the same `TelephonySettingsWatcher` the settings page
+  uses.
+
+The last known binding is deliberately kept across a later failure: "registered at 09:12 as this
+contact, failing since" reads better than a blank field.
+
 ### Telephony:TraceSip is now the only SIP-trace switch
 
 It used to take two settings that had to agree — `Telephony:TraceSip` to attach the handlers and a

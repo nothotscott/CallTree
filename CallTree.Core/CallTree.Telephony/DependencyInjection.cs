@@ -1,5 +1,6 @@
 using CallTree.Telephony.Audio;
 using CallTree.Telephony.Configuration;
+using CallTree.Telephony.Status;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
@@ -20,6 +21,7 @@ public static class DependencyInjection
         services.AddSingleton<IConfigureOptions<LoggerFilterOptions>>(new SipTraceLogLevel(configuration));
 
         services.AddSingleton<TelephonySettingsWatcher>();
+        services.AddSingleton<TelephonyStatus>();
         services.AddSingleton<PromptLibrary>();
         services.AddHostedService<TelephonyBackgroundService>();
 
