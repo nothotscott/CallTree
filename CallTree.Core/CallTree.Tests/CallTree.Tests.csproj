@@ -13,6 +13,8 @@
     <ProjectReference Include="..\CallTree.Telephony\CallTree.Telephony.csproj" />
     <!-- For the timestamp value converter's format handling. No database is touched. -->
     <ProjectReference Include="..\CallTree.Infrastructure\CallTree.Infrastructure.csproj" />
+    <!-- For the settings merge rules, which decide whether a saved trunk password survives. No host is started. -->
+    <ProjectReference Include="..\CallTree.Api\CallTree.Api.csproj" />
   </ItemGroup>
 
   <ItemGroup>

@@ -28,4 +28,15 @@
     <Content Include="prompts\**\*.wav" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
+  <!--
+    wwwroot holds the built SvelteKit UI, which only the container build produces (deploy/Dockerfile
+    copies it in), so it is gitignored and absent from a fresh clone. The build still writes a static
+    web assets manifest naming it, and in Development the host reads that manifest while constructing
+    the builder - a missing directory is an unhandled DirectoryNotFoundException before a single line
+    of Program.Main runs. Creating it here is the only fix that lands early enough.
+  -->
+  <Target Name="EnsureWebRoot" BeforeTargets="BeforeBuild">
+    <MakeDir Directories="$(MSBuildProjectDirectory)\wwwroot" />
+  </Target>
+
 </Project>

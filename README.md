@@ -63,10 +63,33 @@ dotnet run --project CallTree.Api
 
 Look for `SIP registration successful` in the log, then call your DID.
 
+You can also set all of these from the web UI's settings page instead, which writes them to
+`data/config.json` — that is how a container is meant to be configured. User secrets are still the right
+place in development, because they sit *above* that file and stay out of the working tree.
+
 If registration succeeds but calls never arrive, the cause is almost always NAT — see
 [Troubleshooting](#troubleshooting).
 
 ## Configuration
+
+Settings come from three layers, each overriding the one above it:
+
+1. **`appsettings.json`** — defaults, baked into the build.
+2. **`config.json`** — written by the settings page in the web UI, at `Storage:ConfigFile`
+   (`data/config.json` by default, `/data/config.json` in the container). It lives on the data volume
+   alongside the database and the recordings, so the volume carries the whole instance. Changes are
+   picked up without a restart; whether the *SIP stack* can act on them is a separate question, below.
+3. **Environment variables** (and user secrets in development) — for values a particular host must
+   always have. These win, so the settings page reports them as overridden rather than accepting an
+   edit that would silently do nothing.
+
+Most settings are read once, when the sockets are bound and the trunk registration is established:
+changing them saves fine but needs a restart, and the settings page lists exactly which ones are
+waiting. `MyCellNumber`, `DidNumber`, `ScreeningDigit`, `ScreeningTimeoutSeconds` and `TraceSip` apply
+immediately.
+
+`config.json` holds the trunk password in plain text — necessary if the UI is to set one. It is written
+owner-only where the platform supports it; treat it like the recordings.
 
 | Setting | Default | What it does |
 |---|---|---|
@@ -83,8 +106,9 @@ If registration succeeds but calls never arrive, the cause is almost always NAT 
 | `Telephony:ScreeningTimeoutSeconds` | `12` | How long they have to press it |
 | `Telephony:PromptsRoot` | `prompts` | Prompt directory, relative to the content root |
 | `Telephony:ListenOnTcp` | `true` | Also accept SIP over TCP |
-| `Telephony:TraceSip` | `false` | Log complete SIP messages. Essential for bring-up, noisy after |
+| `Telephony:TraceSip` | `false` | Log complete SIP messages. Essential for bring-up, noisy after. Raises the `CallTree.Telephony.SipTrace` log category to `Trace` by itself — there is no second logging setting to keep in step — and applies without a restart |
 | `Storage:RecordingsRoot` | `data/recordings` | Where recordings are written |
+| `Storage:ConfigFile` | `data/config.json` | The file the settings page writes |
 | `ConnectionStrings:CallTree` | `Data Source=data/calltree.db` | SQLite database |
 
 In containers, use environment variables with double underscores: `Telephony__DidNumber`.
@@ -175,14 +199,14 @@ there is no separate frontend container, no second port, and no CORS to configur
 `http://<host>:8080/`.
 
 **CasaOS** is supported directly: [`deploy/casaos-compose.yml`](deploy/casaos-compose.yml) is written for
-its **Custom Install → Import** dialog. Fill in the `CHANGEME` values and paste the file. It is a separate
-variant because pasted YAML has no `.env` beside it, so every setting is inline; see
-[`deploy/README.md`](deploy/README.md#on-casaos) for what that implies for credential storage.
+its **Custom Install → Import** dialog. Paste the file, install, then configure the trunk from the app's
+settings page — nothing has to be edited in the YAML first, which also keeps the trunk password out of a
+Compose file on that host. See [`deploy/README.md`](deploy/README.md#on-casaos).
 
 ## Web UI and API
 
-The backend exposes a read-only call log, and the SvelteKit frontend in
-[`CallTree.UI/`](CallTree.UI/) browses it. Run the two together:
+The backend exposes a read-only call log and a settings endpoint, and the SvelteKit frontend in
+[`CallTree.UI/`](CallTree.UI/) provides a browser for both. Run the two together:
 
 ```bash
 dotnet run --project CallTree.Api    # from CallTree.Core/, serves the API on :5146
@@ -190,11 +214,13 @@ pnpm dev                             # from CallTree.UI/, serves the UI on :5173
 ```
 
 Vite proxies `/api` to the backend, so the browser sees a single origin and there is no CORS to configure.
-The UI is at <http://localhost:5173/calls>.
+The UI is at <http://localhost:5173/calls>, with settings at <http://localhost:5173/settings>.
 
 | Endpoint | Purpose |
 |---|---|
 | `GET /api/calls` | Paginated call log, most recent first |
+| `GET /api/config` | Effective Telephony and Trunk settings |
+| `PUT /api/config` | Save them to `Storage:ConfigFile` |
 | `GET /health` | Liveness |
 
 `GET /api/calls` accepts `page` (1-based), `pageSize` (default 25, capped at 200), `source`
@@ -202,8 +228,15 @@ The UI is at <http://localhost:5173/calls>.
 enum name is a 400. Enums are serialized as names. The response carries `items` plus `page`, `pageSize`,
 `totalCount`, `totalPages`, `hasPreviousPage` and `hasNextPage`.
 
-> **There is no authentication on the API.** The assumed posture is LAN-only, and call records are
-> sensitive. Decide the auth story before exposing it — see [TODO.md](TODO.md).
+The config endpoints never return the trunk password — only `trunkPasswordSet`. On `PUT`, omitting
+`trunkPassword` leaves the configured one alone, so the UI can save an unrelated field without ever
+holding the secret. The response also reports `pendingRestartKeys` (saved, but the running SIP stack is
+still on the old value), `restartOnlyKeys` and `environmentOverrides`.
+
+> **There is no authentication on the API.** The assumed posture is LAN-only. This matters more now than
+> it did for the call log alone: `/api/config` discloses the DID, the mobile number, the public host and
+> the trunk username, and `PUT` can repoint the trunk or clear the DID filter that keeps toll-fraud
+> probes out. Decide the auth story before exposing it — see [TODO.md](TODO.md).
 
 To work on the UI without disturbing a live deployment, leave `Trunk:Host` unset: telephony logs
 `telephony is idle` and never registers, so whichever instance owns the trunk keeps it.

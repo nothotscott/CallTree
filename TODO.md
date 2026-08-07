@@ -78,11 +78,16 @@ real to render.
 ## Phase 7 — REST API (started, out of order)
 
 - [x] `GET /api/calls` — paginated list, most recent first, filterable by source and status.
+- [x] `GET`/`PUT /api/config` — read and save the Telephony and Trunk sections to a writable config
+      file layered under the environment. The password is write-only.
 - [ ] Remaining filters: date range, number, duration.
 - [ ] Call detail endpoint (`GET /api/calls/{id}`) exposing the legs, which the list summary flattens away.
 - [ ] Stream recordings with HTTP range support so playback can seek.
 - [ ] Decide the auth posture: LAN-only, or authenticated remote access. **There is currently no auth and
-      no CORS policy**; the API is reachable by anything that can reach the port.
+      no CORS policy**; the API is reachable by anything that can reach the port. The settings endpoint
+      raises the stakes: `GET /api/config` discloses the DID, the mobile number, the public host and the
+      trunk username, and `PUT` can repoint the trunk or clear the DID filter that turns away toll-fraud
+      probes. This is now the strongest argument for auth, and it should land before any remote exposure.
 
 ## Phase 8 — Frontend (in progress, out of order)
 
@@ -94,6 +99,12 @@ show.
 - [x] Scaffold the project (`sv create`, minimal template, prettier + eslint + tailwind).
 - [x] Call log at `/calls`: paginated table, source and status filters, filter state in the URL. Reads
       `GET /api/calls` through the Vite dev proxy, so it is same-origin with no CORS.
+- [x] Settings page at `/settings`: edits the Telephony and Trunk sections, marks the fields an
+      environment variable is overriding, and reports which saved keys are waiting on a restart.
+- [ ] Restart the service from the UI, so a trunk change does not need shell access. Needs care: the
+      process supervises itself only under Compose's `restart: unless-stopped`, and there is no auth.
+- [ ] Show trunk registration state on the settings page, once Phase 6 exposes it on `/health`. Right
+      now "did my trunk change work?" is answered by reading the log.
 - [ ] Call detail view, once the detail endpoint exists.
 - [ ] Recording player, once Phase 3 produces recordings.
 - [x] Decide how the UI reaches the API in production: **same-origin**, served by the ASP.NET host from

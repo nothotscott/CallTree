@@ -50,9 +50,22 @@ The backend is same-origin **in development and in production**. In development 
 serves from its own `wwwroot` on the same port. Either way there is no CORS anywhere, and no absolute API
 origin should ever be hard-coded.
 
-Types for the API live in `src/lib/api/calls.ts` and are hand-mirrored from the C# read models. Enums
-travel as **names**, not numbers. Data is fetched in `load` functions, and list state (page, filters)
-lives in the URL rather than component state, so views are linkable and the back button works.
+Types for the API live in `src/lib/api/` (`calls.ts`, `config.ts`) and are hand-mirrored from the C#
+models. Enums travel as **names**, not numbers. Data is fetched in `load` functions, and list state
+(page, filters) lives in the URL rather than component state, so views are linkable and the back button
+works.
+
+The settings page (`/settings`) is the one place that writes:
+
+- **The trunk password is write-only.** The API never sends it, only `trunkPasswordSet`. Send
+  `trunkPassword: null` when the field is blank — an empty string would be written to the config file
+  and would then override a password coming from user secrets or the environment.
+- **Two spellings of the same key.** Configuration keys use a colon (`Telephony:SipListenPort`, which is
+  also how you would spell it as an environment variable); validation errors use the C# property path
+  with a dot. `errorsFor`/`includesKey` normalise, so a field carries one key rather than two.
+- **The form is seeded by an `$effect`, not by initialising `$state` from `data`.** Initialising once
+  captures only the first value, so returning to the page later would show a form the server had moved
+  on from — and `svelte-check` warns about exactly that (`state_referenced_locally`).
 
 ## Structure
 

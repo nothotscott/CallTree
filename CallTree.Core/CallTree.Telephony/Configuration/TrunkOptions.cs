@@ -1,10 +1,16 @@
 namespace CallTree.Telephony.Configuration;
 
 /// <summary>
-/// SIP trunk (or test PBX extension) registration settings. The password should come
-/// from an environment variable (Trunk__Password), never from a committed file.
+/// SIP trunk (or test PBX extension) registration settings. The password should come from an
+/// environment variable (Trunk__Password), user secrets, or the writable config file the settings UI
+/// edits — never from a committed file.
 /// </summary>
-public sealed class TrunkOptions
+/// <remarks>
+/// A record so that a snapshot can be compared with <c>==</c> and amended with <c>with</c>:
+/// <see cref="TelephonySettingsWatcher"/> relies on both to work out whether a configuration reload
+/// changed anything that only takes effect at startup.
+/// </remarks>
+public sealed record TrunkOptions
 {
     public const string SectionName = "Trunk";
 

@@ -133,6 +133,60 @@ Two things that had to be got right, both verified by running the built image:
 Verified end to end in the container: `/`, `/calls`, `/api/calls`, `/health`, a 404 on an unknown API path,
 `curl` present for the Compose healthcheck, and telephony correctly idle without trunk configuration.
 
+## Configuration from the UI (2026-08-07)
+
+Trunk and telephony settings are now editable at `/settings` instead of only through environment
+variables, which is what makes a container's data volume the whole instance rather than half of it.
+
+- **Three layers**: `appsettings.json` (what ships) < `Storage:ConfigFile` (`/data/config.json`, written
+  by the UI, `reloadOnChange`) < environment and user secrets (what this host demands). The file is
+  inserted as a configuration source in `Program.AddWritableConfiguration`, and it goes into the volume
+  beside the database and the recordings, so moving the volume moves the trunk with it.
+- **Ordering is the whole trick, and getting it wrong fails quietly.** The source has to be inserted
+  before the *unprefixed* environment source: the host adds `ASPNETCORE_` and `DOTNET_` sources of the
+  same type ahead of the appsettings files, so matching on type alone puts the config file *underneath*
+  `appsettings.json`. The first run did exactly that, and the symptom was partial — `DidNumber` and
+  `PublicHost` (absent from appsettings) saved correctly while `SipListenPort`, `TraceSip` and the whole
+  `Trunk` section were silently ignored. It reads as a flaky writer, not an ordering bug.
+- **The password is write-only.** It is never returned; a `PUT` that omits it leaves the configured value
+  alone. Writing an empty string instead would override the same key coming from user secrets or the
+  environment, so saving any unrelated field would blank a working credential.
+- **Honest reporting beats silent acceptance.** Sockets are bound and the trunk registered once, at
+  startup, and rebinding mid-flight would drop calls and hand the provider's binding to nobody. So those
+  settings are deliberately restart-only, and `TelephonySettingsWatcher` — one list, used by both the
+  hosted service's log line and the API response — says which saved keys the running stack has not
+  picked up. The UI also marks fields an environment variable is overriding, because an edit there
+  saves fine and changes nothing.
+- **Live settings** are the numbers, the screening digit and timeout, and SIP tracing. The hosted service
+  moved from `IOptions` to `IOptionsMonitor` and re-reads them per call.
+
+`.env.example` and `casaos-compose.yml` now ship with the trunk and telephony blocks commented out. For
+CasaOS in particular that removes the step where credentials are pasted into a Compose file that ends up
+root-readable at `/var/lib/casaos/apps/calltree/`.
+
+### Telephony:TraceSip is now the only SIP-trace switch
+
+It used to take two settings that had to agree — `Telephony:TraceSip` to attach the handlers and a
+`Logging:LogLevel` entry to let Trace through. Setting one without the other produced no output at all,
+which looks exactly like a packet that never reached the process: the one conclusion SIP tracing exists
+to rule out.
+
+`SipTraceLogLevel`, an `IConfigureOptions<LoggerFilterOptions>` registered after the rules built from the
+`Logging` section, raises that category to Trace whenever `TraceSip` is on. Registering it as configured
+options rather than a one-off `AddFilter` is what makes it reload: filter options are recomputed on the
+`Logging` section's change token and the logger factory refreshes its filters, so the setting can be
+flipped from the UI during a misbehaving call rather than needing a restart that drops the registration
+and the call being investigated. The trace handlers are attached unconditionally and check
+`IsEnabled(Trace)` first, which is what allows that.
+
+### wwwroot has to exist before the builder does
+
+A clean clone would not start in Development: `wwwroot` holds the built UI, only the container build
+produces it, so it is gitignored — but the build still emits a static web assets manifest naming it, and
+the host reads that manifest *inside* `WebApplication.CreateBuilder`. The result is an unhandled
+`DirectoryNotFoundException` before a line of `Main` runs, which no runtime guard can catch. Fixed with
+an MSBuild target that creates the directory.
+
 ### SQLite cannot sort a DateTimeOffset
 
 Ordering the log by `StartedAt` failed outright: *"SQLite does not support expressions of type
@@ -178,4 +232,6 @@ yet — there is no API to read from until Phase 7.
 - Phase 0: validated (build, tests, boot, migration, `/health`).
 - Phase 1: validated end to end over a real trunk.
 - Phase 2: validated by phone — prompt audible, DTMF detected, all three outcomes persisted correctly.
-- Unit tests: 34 passing.
+- Configuration layering, hot reload, the password merge rules and the restart-required reporting:
+  verified against a running instance, not just unit-tested.
+- Unit tests: 81 passing.

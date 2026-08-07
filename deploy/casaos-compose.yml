@@ -6,15 +6,20 @@
 # CasaOS installs an app by pasting a Compose file into Custom Install -> Import, so this is a
 # self-contained variant of docker-compose.yml. Two differences, both forced by that workflow:
 #
-#   - No env_file. Pasted YAML has no .env beside it on disk, so every setting is inline and you edit
-#     them in the import dialog. Trunk credentials therefore live in the app's Compose file at
-#     /var/lib/casaos/apps/calltree/ - readable by root on that host.
+#   - No env_file. Pasted YAML has no .env beside it on disk, so any setting left here is inline and
+#     you edit it in the import dialog.
 #   - No ${VAR} substitution, for the same reason: there is nothing to substitute from.
 #
 # The x-casaos blocks are CasaOS's app manifest. Without a top-level `name` and `x-casaos.main` the
 # importer has no way to tell which service is the app, and the tile ends up with no working web link.
 #
-# Everything marked CHANGEME must be set before the first call will work.
+# Trunk and telephony settings are commented out on purpose: configure them in the web UI at
+# /settings after the first start. They are saved to /data/config.json inside the volume, so they
+# survive image upgrades, move with the volume, and keep the trunk password out of a Compose file
+# sitting readable at /var/lib/casaos/apps/calltree/. Uncommenting a line pins it - the environment
+# sits above the config file, so the UI will report it as overridden and saving it will do nothing.
+#
+# Until a trunk is configured the app starts, serves the UI, and logs "telephony is idle".
 
 name: calltree
 
@@ -33,39 +38,40 @@ services:
     environment:
       ASPNETCORE_ENVIRONMENT: Production
 
-      # --- SIP trunk ---
-      Trunk__Host: sip.example.com
-      Trunk__Port: "5060"
-      Trunk__Username: CHANGEME
-      Trunk__Password: CHANGEME
-      Trunk__RegistrationExpirySeconds: "120"
+      # --- SIP trunk --- (set these in the UI at /settings, not here)
+      # Trunk__Host: sip.example.com
+      # Trunk__Port: "5060"
+      # Trunk__Username: CHANGEME
+      # Trunk__Password: CHANGEME
+      # Trunk__RegistrationExpirySeconds: "120"
 
-      # --- Telephony ---
+      # --- Telephony --- (set these in the UI at /settings, not here)
       # The DID this instance owns. INVITEs addressed to anything else are rejected with a 404 before a
       # Call row exists, which is what turns away the dial-plan probes that hit any open SIP port. Setting
       # this is the single most useful thing you can do; leaving it blank accepts everything.
-      Telephony__DidNumber: "+15555550100"
+      # Telephony__DidNumber: "+15555550100"
 
       # Calls from this number are classified as your own outbound calls rather than inbound callers.
-      Telephony__MyCellNumber: "+15555550199"
+      # Telephony__MyCellNumber: "+15555550199"
 
       # Public IP or DDNS hostname. Mandatory behind NAT: without it the trunk is told to reach you at a
       # LAN address, inbound INVITEs never arrive, and nothing at all is logged because they never reach
       # the process.
-      Telephony__PublicHost: CHANGEME
+      # Telephony__PublicHost: CHANGEME
 
-      Telephony__SipListenPort: "5060"
-      Telephony__RtpPortStart: "10000"
-      Telephony__RtpPortEnd: "10100"
+      # Telephony__SipListenPort: "5060"
+      # Telephony__RtpPortStart: "10000"
+      # Telephony__RtpPortEnd: "10100"
 
       # Digit an inbound caller must press to clear the spam gate, and how long they have.
-      Telephony__ScreeningDigit: "1"
-      Telephony__ScreeningTimeoutSeconds: "12"
+      # Telephony__ScreeningDigit: "1"
+      # Telephony__ScreeningTimeoutSeconds: "12"
 
-      # Logs complete SIP messages. Worth leaving on until the first call succeeds: the trace fires
-      # immediately after parse, so if a call fails and no trace line appears the packet never reached the
-      # process at all, which rules out the whole application in one step. Very noisy afterwards.
-      Telephony__TraceSip: "true"
+      # Logs complete SIP messages. Worth turning on from the settings page until the first call
+      # succeeds: the trace fires immediately after parse, so if a call fails and no trace line appears
+      # the packet never reached the process at all, which rules out the whole application in one step.
+      # It applies without a restart, which is why it is better left to the UI than pinned here.
+      # Telephony__TraceSip: "true"
 
       # --- Logging ---
       Logging__LogLevel__Default: Information
@@ -101,7 +107,7 @@ services:
       volumes:
         - container: /data
           description:
-            en_us: SQLite database and call recordings.
+            en_us: SQLite database, call recordings, and the settings saved from the web UI.
 
 x-casaos:
   # publish-container.yml sets no platforms list, so it builds for the GitHub runner only. Add

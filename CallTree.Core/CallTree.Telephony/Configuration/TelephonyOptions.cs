@@ -1,6 +1,10 @@
 namespace CallTree.Telephony.Configuration;
 
-public sealed class TelephonyOptions
+/// <remarks>
+/// A record for the same reason as <see cref="TrunkOptions"/>: value equality and <c>with</c> are what
+/// <see cref="TelephonySettingsWatcher"/> and the settings endpoint are built on.
+/// </remarks>
+public sealed record TelephonyOptions
 {
     public const string SectionName = "Telephony";
 
@@ -21,7 +25,12 @@ public sealed class TelephonyOptions
     /// </summary>
     public string PublicHost { get; init; } = "";
 
-    /// <summary>Logs every SIP message sent and received. Noisy; for bring-up and NAT debugging.</summary>
+    /// <summary>
+    /// Logs every SIP message sent and received. Noisy; for bring-up and NAT debugging. Setting this
+    /// raises the <see cref="SipTrace.CategoryName"/> log category to Trace on its own — there is no
+    /// second logging setting to keep in step — and it takes effect without a restart, so tracing can
+    /// be turned on during a misbehaving call without dropping the registration.
+    /// </summary>
     public bool TraceSip { get; init; }
 
     /// <summary>

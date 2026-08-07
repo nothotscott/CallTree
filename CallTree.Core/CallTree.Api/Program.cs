@@ -1,10 +1,14 @@
 using System.Text.Json.Serialization;
+using CallTree.Api.Settings;
 using CallTree.Application;
 using CallTree.Infrastructure;
+using CallTree.Infrastructure.Configuration;
 using CallTree.Infrastructure.Persistence;
 using CallTree.Telephony;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Configuration.EnvironmentVariables;
+using Microsoft.Extensions.Configuration.Json;
 using Scalar.AspNetCore;
 
 namespace CallTree.Api
@@ -14,6 +18,9 @@ namespace CallTree.Api
         public static void Main(string[] args)
         {
             var builder = WebApplication.CreateBuilder(args);
+
+            var configFile = AddWritableConfiguration(builder);
+            builder.Services.AddSingleton(configFile);
 
             builder.Services
                 .AddControllers()
@@ -70,6 +77,61 @@ namespace CallTree.Api
             app.MapFallbackToFile("index.html");
 
             app.Run();
+        }
+
+        /// <summary>
+        /// Inserts the writable config file the settings UI edits, between the appsettings files and
+        /// the environment variables: appsettings (what ships) is overridden by the config file (what
+        /// this instance was told), which is overridden by the environment (what this container run
+        /// demands). Anything else the host added after the environment - the command line - still wins.
+        /// </summary>
+        /// <remarks>
+        /// Ordering is done by finding the environment-variable source rather than by index, because the
+        /// host decides how many sources precede it and that has changed between releases. It has to be
+        /// the *unprefixed* one: the host adds ASPNETCORE_ and DOTNET_ sources of the same type before
+        /// the appsettings files, and inserting ahead of those puts the config file underneath
+        /// appsettings.json instead of above it. That failure is quiet and partial — keys absent from
+        /// appsettings appear to save correctly while keys present there are silently ignored.
+        ///
+        /// The source is added directly rather than through AddJsonFile so it can be positioned; that
+        /// means resolving the file provider by hand, since the builder would otherwise resolve the path
+        /// against the content root and reload-watch the wrong directory.
+        /// </remarks>
+        private static RuntimeConfigFile AddWritableConfiguration(WebApplicationBuilder builder)
+        {
+            var path = RuntimeConfigFile.ResolvePath(
+                builder.Configuration[$"{StorageOptions.SectionName}:{nameof(StorageOptions.ConfigFile)}"],
+                builder.Environment.ContentRootPath);
+
+            // The file watcher needs the directory to exist now, not once something writes the file.
+            var directory = Path.GetDirectoryName(path);
+            if (!string.IsNullOrEmpty(directory))
+            {
+                Directory.CreateDirectory(directory);
+            }
+
+            var source = new JsonConfigurationSource
+            {
+                Path = path,
+                Optional = true,
+                ReloadOnChange = true,
+            };
+            source.ResolveFileProvider();
+
+            var sources = builder.Configuration.Sources;
+            var index = sources.Count;
+            for (var i = 0; i < sources.Count; i++)
+            {
+                if (sources[i] is EnvironmentVariablesConfigurationSource { Prefix: null or "" })
+                {
+                    index = i;
+                    break;
+                }
+            }
+
+            sources.Insert(index, source);
+
+            return new RuntimeConfigFile(path);
         }
 
         private static void EnsureDatabase(WebApplication app)

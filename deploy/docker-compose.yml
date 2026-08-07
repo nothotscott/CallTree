@@ -25,7 +25,8 @@ services:
     environment:
       ASPNETCORE_ENVIRONMENT: Production
     volumes:
-      # SQLite database and recordings. Back up by copying this directory.
+      # SQLite database, recordings, and config.json (what the settings UI writes). Back up by copying
+      # this directory - it is the whole instance, and it holds the trunk password in plain text.
       - /srv/calltree/data:/data
       # Prompt WAVs. Bind-mounting them lets you change the wording without rebuilding the image;
       # drop this line to use the prompts baked in at build time.

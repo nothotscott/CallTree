@@ -12,8 +12,9 @@
 	<header class="border-b border-slate-200 bg-white">
 		<div class="mx-auto flex max-w-6xl items-center gap-6 px-6 py-4">
 			<a href={resolve('/calls')} class="text-lg font-semibold tracking-tight">CallTree</a>
-			<nav class="text-sm text-slate-600">
+			<nav class="flex gap-4 text-sm text-slate-600">
 				<a href={resolve('/calls')} class="hover:text-slate-900">Calls</a>
+				<a href={resolve('/settings')} class="hover:text-slate-900">Settings</a>
 			</nav>
 		</div>
 	</header>

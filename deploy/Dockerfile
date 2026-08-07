@@ -62,9 +62,13 @@ COPY --from=ui /ui/build ./wwwroot
 # Program.EnsureDatabase does, but the mount has to be writable.
 VOLUME ["/data"]
 
+# The settings UI writes Telephony/Trunk configuration to Storage:ConfigFile. Pointing it into the
+# volume alongside the database and the recordings is what makes the volume the whole instance: move
+# it to another host and the trunk moves with it. Note it holds the trunk password in plain text.
 ENV ASPNETCORE_URLS=http://0.0.0.0:8080 \
     ConnectionStrings__CallTree="Data Source=/data/calltree.db" \
-    Storage__RecordingsRoot=/data/recordings
+    Storage__RecordingsRoot=/data/recordings \
+    Storage__ConfigFile=/data/config.json
 
 # Documentation only — host networking ignores published ports.
 EXPOSE 8080/tcp 5060/udp 5060/tcp

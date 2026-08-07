@@ -36,6 +36,34 @@ emits one fallback document and routing happens in the browser. For a LAN-only c
 If you ever want SSR, that is the point at which a second container (`adapter-node`) starts to earn its
 keep — and it would need CORS or a reverse proxy in front of both.
 
+## Configuring it
+
+Trunk and telephony settings are edited in the web UI at **`/settings`**, which writes them to
+`config.json` inside the data volume. Configuration is layered, lowest first:
+
+| Layer | Where | Use it for |
+|---|---|---|
+| `appsettings.json` | baked into the image | defaults that ship |
+| `config.json` | `/data/config.json`, written by the UI | this instance's settings |
+| environment | `.env` / Compose `environment:` | pinning a value this host must always have |
+
+Higher layers win, so a setting in the environment cannot be changed from the UI — the settings page
+says so rather than accepting an edit that would do nothing. `.env.example` and `casaos-compose.yml`
+therefore ship with the trunk and telephony blocks **commented out**: uncomment a line only when you
+want it pinned.
+
+Two consequences worth knowing:
+
+- **The volume is the whole instance.** Database, recordings and configuration all live under `/data`,
+  so moving that directory to another host moves the trunk with it. It contains the trunk password in
+  plain text; treat it like the recordings.
+- **Most settings need a restart.** Sockets are bound and the trunk registration is established once, at
+  startup. The settings page lists exactly which saved keys are waiting on a restart rather than
+  pretending they took effect. The numbers, the screening digit and timeout, and SIP tracing apply
+  immediately.
+
+Until a trunk is configured the container starts normally, serves the UI, and logs `telephony is idle`.
+
 ## Host networking, and why
 
 `docker-compose.yml` sets `network_mode: host`. This is not laziness:
@@ -80,25 +108,30 @@ An LXC needs a couple of things before it can run Docker properly.
 5. Configure and start:
 
    ```bash
-   cp .env.example .env      # fill in trunk credentials, DID, and PublicHost
+   cp .env.example .env      # nothing to fill in for a first start
    docker compose up -d
    docker compose logs -f
    ```
 
+6. Open `http://<lxc>:8080/settings` and fill in the trunk credentials, the DID, and `PublicHost`, then
+   restart: `docker compose restart`. Trunk settings are read once, when the service registers.
+
 Confirm it came up with `curl localhost:8080/health` and look for `SIP registration successful` in the
-logs. Registration failing here almost always means `Telephony__PublicHost` is wrong or unset.
+logs. Registration failing here almost always means the public host is wrong or unset.
 
 ## On CasaOS
 
 [`casaos-compose.yml`](casaos-compose.yml) is a variant for CasaOS's **Custom Install → Import**, which
-takes a pasted Compose file. Fill in the `CHANGEME` values, paste the whole file, and install.
+takes a pasted Compose file. Paste the whole file, install, then configure the trunk from the app's
+`/settings` page — there is nothing to edit in the YAML first.
 
 It is a separate file rather than the same one because CasaOS's workflow rules out two things
 `docker-compose.yml` relies on:
 
-- **`env_file` cannot work.** Pasted YAML has no `.env` beside it on disk, so every setting is inline.
-  That means trunk credentials are stored in the app's Compose file under `/var/lib/casaos/apps/calltree/`
-  rather than a separate secrets file — root-readable on that host, which is worth knowing.
+- **`env_file` cannot work.** Pasted YAML has no `.env` beside it on disk, so anything set there is
+  inline — and would then live in the app's Compose file under `/var/lib/casaos/apps/calltree/`,
+  root-readable on that host. Configuring from the UI instead keeps the credentials in the data volume,
+  which is the main reason the trunk block in that file is commented out.
 - **`${VAR:-default}` has nothing to substitute from**, so the image tag is literal.
 
 The file also carries `x-casaos` metadata. CasaOS uses the top-level `name` and `x-casaos.main` to work out
@@ -140,9 +173,10 @@ long-standing source of one-way audio and calls that fail for no visible reason.
 
 ## Backups and upgrades
 
-Everything that matters is under `/srv/calltree`: the SQLite database and the recordings. Copy that
-directory and you have the lot. Upgrading is `docker compose pull && docker compose up -d`; migrations are
-applied automatically at startup.
+Everything that matters is under `/srv/calltree`: the SQLite database, the recordings, and `config.json`.
+Copy that directory and you have the lot — including, in plain text, the trunk password. Upgrading is
+`docker compose pull && docker compose up -d`; migrations are applied automatically at startup and
+`config.json` is untouched by an image upgrade, which is the point of it living on the volume.
 
 Recordings are sensitive. The default posture is LAN-only with no authentication in front of the API —
 think carefully before exposing it, and see the open questions in [`../TODO.md`](../TODO.md).

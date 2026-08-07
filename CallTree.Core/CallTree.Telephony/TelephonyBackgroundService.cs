@@ -21,8 +21,9 @@ namespace CallTree.Telephony;
 /// with silence, logs it, holds 5 seconds, hangs up, and persists the Call aggregate.
 /// </summary>
 public class TelephonyBackgroundService(
-    IOptions<TrunkOptions> trunkOptions,
-    IOptions<TelephonyOptions> telephonyOptions,
+    IOptionsMonitor<TrunkOptions> trunkOptions,
+    IOptionsMonitor<TelephonyOptions> telephonyOptions,
+    TelephonySettingsWatcher settingsWatcher,
     PromptLibrary prompts,
     ICallCommands calls,
     ILoggerFactory loggerFactory) : BackgroundService
@@ -32,15 +33,30 @@ public class TelephonyBackgroundService(
     private readonly ILogger _logger = loggerFactory.CreateLogger<TelephonyBackgroundService>();
     private SIPTransport? _sipTransport;
     private SIPRegistrationUserAgent? _registrationUserAgent;
-    private PhoneNumber? _myCellNumber;
-    private PhoneNumber? _didNumber;
     private IPAddress? _publicAddress;
     private PortRange? _rtpPortRange;
+    private string _lastReportedPendingKeys = "";
+
+    /// <summary>
+    /// The configured mobile, re-read per call: it costs a parse and means the settings UI can correct a
+    /// mistyped number without a restart, which matters because getting it wrong misclassifies every call.
+    /// </summary>
+    private PhoneNumber? MyCellNumber =>
+        PhoneNumber.TryParse(telephonyOptions.CurrentValue.MyCellNumber, out var number) ? number : null;
+
+    /// <summary>Our DID, re-read per call for the same reason.</summary>
+    private PhoneNumber? DidNumber =>
+        PhoneNumber.TryParse(telephonyOptions.CurrentValue.DidNumber, out var number) ? number : null;
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        var trunk = trunkOptions.Value;
-        var telephony = telephonyOptions.Value;
+        var trunk = trunkOptions.CurrentValue;
+        var telephony = telephonyOptions.CurrentValue;
+
+        // Taken before the trunk check, so that configuring a trunk on an idle instance is correctly
+        // reported as needing a restart rather than looking like it took effect.
+        settingsWatcher.CaptureStartupSnapshot(telephony, trunk);
+        WatchForRestartRequiringChanges();
 
         if (!trunk.IsConfigured)
         {
@@ -48,20 +64,12 @@ public class TelephonyBackgroundService(
             return;
         }
 
-        if (PhoneNumber.TryParse(telephony.MyCellNumber, out var myCell))
-        {
-            _myCellNumber = myCell;
-        }
-        else
+        if (MyCellNumber is null)
         {
             _logger.LogWarning("Telephony:MyCellNumber is not set - all calls will be classified as Inbound.");
         }
 
-        if (PhoneNumber.TryParse(telephony.DidNumber, out var did))
-        {
-            _didNumber = did;
-        }
-        else
+        if (DidNumber is null)
         {
             _logger.LogWarning(
                 "Telephony:DidNumber is not set - every INVITE reaching this port will be answered, "
@@ -87,10 +95,7 @@ public class TelephonyBackgroundService(
 
         ConfigurePublicAddress(telephony);
 
-        if (telephony.TraceSip)
-        {
-            EnableSipTracing();
-        }
+        AttachSipTracing();
 
         _logger.LogInformation(
             "SIP listening on {Channels}; advertising {ContactHost} in Contact/SDP; RTP {RtpStart}-{RtpEnd}; SIP trace {TraceState}",
@@ -162,23 +167,93 @@ public class TelephonyBackgroundService(
         }
     }
 
-    /// <summary>Logs whole SIP messages on the wire — the only reliable way to see NAT/routing problems.</summary>
-    private void EnableSipTracing()
+    /// <summary>
+    /// Logs whole SIP messages on the wire — the only reliable way to see NAT/routing problems.
+    /// </summary>
+    /// <remarks>
+    /// The handlers are attached unconditionally and each one asks the logger whether Trace is enabled
+    /// before serialising anything, so the cost when tracing is off is a delegate call and a bool. That
+    /// is deliberate: it makes Telephony:TraceSip a pure logging-level switch (see
+    /// <see cref="SipTraceLogLevel"/>), which in turn means it can be flipped from the settings UI
+    /// while a call is misbehaving instead of requiring a restart that drops the registration and the
+    /// call you were trying to look at.
+    /// </remarks>
+    private void AttachSipTracing()
     {
-        var trace = loggerFactory.CreateLogger("CallTree.Telephony.SipTrace");
+        var trace = loggerFactory.CreateLogger(SipTrace.CategoryName);
 
         _sipTransport!.SIPRequestOutTraceEvent += (local, remote, request) =>
-            trace.LogTrace("SIP TX {Local} -> {Remote}\n{Message}", local, remote, request.ToString());
+        {
+            if (trace.IsEnabled(LogLevel.Trace))
+            {
+                trace.LogTrace("SIP TX {Local} -> {Remote}\n{Message}", local, remote, request.ToString());
+            }
+        };
         _sipTransport.SIPRequestInTraceEvent += (local, remote, request) =>
-            trace.LogTrace("SIP RX {Remote} -> {Local}\n{Message}", remote, local, request.ToString());
+        {
+            if (trace.IsEnabled(LogLevel.Trace))
+            {
+                trace.LogTrace("SIP RX {Remote} -> {Local}\n{Message}", remote, local, request.ToString());
+            }
+        };
         _sipTransport.SIPResponseOutTraceEvent += (local, remote, response) =>
-            trace.LogTrace("SIP TX {Local} -> {Remote}\n{Message}", local, remote, response.ToString());
+        {
+            if (trace.IsEnabled(LogLevel.Trace))
+            {
+                trace.LogTrace("SIP TX {Local} -> {Remote}\n{Message}", local, remote, response.ToString());
+            }
+        };
         _sipTransport.SIPResponseInTraceEvent += (local, remote, response) =>
-            trace.LogTrace("SIP RX {Remote} -> {Local}\n{Message}", remote, local, response.ToString());
+        {
+            if (trace.IsEnabled(LogLevel.Trace))
+            {
+                trace.LogTrace("SIP RX {Remote} -> {Local}\n{Message}", remote, local, response.ToString());
+            }
+        };
+
+        // Unparseable traffic is worth a warning whether or not tracing is on: it means something is
+        // sending us malformed SIP, which no amount of application-level debugging would explain.
         _sipTransport.SIPBadRequestInTraceEvent += (local, remote, message, field, raw) =>
             trace.LogWarning("SIP RX (bad request) {Remote} -> {Local}: {Message} [{Field}]\n{Raw}", remote, local, message, field, raw);
         _sipTransport.SIPBadResponseInTraceEvent += (local, remote, message, field, raw) =>
             trace.LogWarning("SIP RX (bad response) {Remote} -> {Local}: {Message} [{Field}]\n{Raw}", remote, local, message, field, raw);
+    }
+
+    /// <summary>
+    /// Reports configuration changes the running SIP stack cannot pick up. Without this a setting saved
+    /// from the UI looks applied — the file is written, the API confirms it — while the sockets and the
+    /// trunk binding carry on with the old values.
+    /// </summary>
+    private void WatchForRestartRequiringChanges()
+    {
+        void Report()
+        {
+            var pending = settingsWatcher.PendingRestartKeys;
+            var summary = string.Join(", ", pending);
+
+            // The monitor fires once per section, so a single save produces two callbacks.
+            if (summary == _lastReportedPendingKeys)
+            {
+                return;
+            }
+
+            _lastReportedPendingKeys = summary;
+
+            if (pending.Count > 0)
+            {
+                _logger.LogWarning(
+                    "Configuration changed for settings that only apply at startup ({Keys}) - "
+                    + "restart the process to apply them. Everything else is already live.",
+                    summary);
+            }
+            else
+            {
+                _logger.LogInformation("Telephony configuration reloaded; all changes are live.");
+            }
+        }
+
+        telephonyOptions.OnChange(_ => Report());
+        trunkOptions.OnChange(_ => Report());
     }
 
     private void StartRegistration(TrunkOptions trunk)
@@ -225,7 +300,11 @@ public class TelephonyBackgroundService(
         var rawCallerId = request.Header.From.FromURI.User ?? "";
         var remoteEndPoint = request.RemoteSIPEndPoint?.ToString() ?? "unknown";
 
-        if (!IsAddressedToUs(request))
+        // Read once per call rather than per use, so a configuration reload cannot change the answer
+        // halfway through handling one INVITE.
+        var did = DidNumber;
+
+        if (!IsAddressedToUs(request, did))
         {
             _logger.LogWarning(
                 "Rejecting INVITE for {RequestUri} from {RawCallerId} at {RemoteEndPoint} (User-Agent '{UserAgent}') - "
@@ -234,7 +313,7 @@ public class TelephonyBackgroundService(
                 rawCallerId,
                 remoteEndPoint,
                 request.Header.UserAgent ?? "-",
-                _didNumber!.Value);
+                did!.Value);
 
             var rejection = new UASInviteTransaction(_sipTransport, request, null);
             rejection.SendFinalResponse(SIPResponse.GetResponse(request, SIPResponseStatusCodesEnum.NotFound, null));
@@ -372,7 +451,8 @@ public class TelephonyBackgroundService(
         Func<CallCommand, string, Task> endOnceAsync,
         CancellationToken cancellationToken)
     {
-        var telephony = telephonyOptions.Value;
+        // Live: the screening digit and timeout are read when the gate runs, not when the process started.
+        var telephony = telephonyOptions.CurrentValue;
 
         var gate = new ScreeningGate(
             userAgent,
@@ -399,21 +479,21 @@ public class TelephonyBackgroundService(
     /// place an international call for them, so the URI user is the thing that distinguishes a real call
     /// from a probe — comparison is on the normalised number, since trunks vary on the +1 prefix.
     /// </summary>
-    private bool IsAddressedToUs(SIPRequest request)
+    private static bool IsAddressedToUs(SIPRequest request, PhoneNumber? didNumber)
     {
-        if (_didNumber is null)
+        if (didNumber is null)
         {
             return true;
         }
 
-        return PhoneNumber.TryParse(request.URI.User, out var dialled) && dialled == _didNumber;
+        return PhoneNumber.TryParse(request.URI.User, out var dialled) && dialled == didNumber;
     }
 
     private (CallSource Source, SourceClassification Classification, PhoneNumber? CallerNumber) ClassifyCaller(string rawCallerId)
     {
         PhoneNumber.TryParse(rawCallerId, out var callerNumber);
 
-        return callerNumber is not null && callerNumber == _myCellNumber
+        return callerNumber is not null && callerNumber == MyCellNumber
             ? (CallSource.Outbound, SourceClassification.CallerIdMatch, callerNumber)
             : (CallSource.Inbound, SourceClassification.Default, callerNumber);
     }

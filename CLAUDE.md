@@ -45,6 +45,7 @@ CallTree/
 │   ├── CallTree.Infrastructure/ # EF Core + SQLite (CallTreeDbContext, migrations, CallRepository)
 │   ├── CallTree.Telephony/      # SIPSorcery + NAudio; TelephonyBackgroundService owns the SIP UA
 │   ├── CallTree.Api/            # ASP.NET Core host; DI wiring; /health; Scalar at /scalar (dev)
+│   │                            #   Settings/ owns the writable config file the UI edits
 │   └── CallTree.Tests/          # xUnit v3 — pure-logic tests only (state machine, PhoneNumber, WAV logic)
 └── CallTree.UI/             # SvelteKit frontend (has its own CLAUDE.md/AGENTS.md — read them)
 ```
@@ -69,6 +70,11 @@ Dependency direction: `Api → {Telephony, Infrastructure} → Application → D
 - Bridging (RTP payload relay) and recording (decoded PCM tap) are separate concerns — don't conflate.
 - Enums persist as strings; timestamps are `DateTimeOffset` passed explicitly into domain methods (testability).
 - Trunk credentials/config live in options bound from configuration, never in the DB or the domain.
+- **Configuration is three layers**: `appsettings.json` < `Storage:ConfigFile` (`data/config.json`, what
+  the settings UI writes, `reloadOnChange`) < environment/user secrets. `Program.AddWritableConfiguration`
+  inserts the file source; the API never writes anywhere else. Settings the SIP stack only reads at
+  startup are enumerated in `TelephonySettingsWatcher`, which is the single source of truth for "did
+  that change actually take effect" — the hosted service logs it and `/api/config` reports it.
 - **Only PCMU is offered.** See the codec table in README.md before changing this — Phase 3's decode and
   Phase 4's payload relay both assume it.
 
@@ -127,6 +133,13 @@ stage and copies them into the API's `wwwroot`. One container, one port, one ori
 - **Set `Telephony:TraceSip` to see whole SIP messages** on the wire (`SIPRequestInTraceEvent` and friends).
   It is fired immediately after parse, before any dispatch or filtering — so if a call fails and *no* trace
   line appears, the packet never reached the process, which rules out the whole application at once.
+  `TraceSip` is the *only* switch: `SipTraceLogLevel` (an `IConfigureOptions<LoggerFilterOptions>`
+  registered by `AddTelephony`) raises the `CallTree.Telephony.SipTrace` category to Trace on its own.
+  Don't reintroduce a `Logging:LogLevel` entry for that category — the two settings used to have to
+  agree, and setting one without the other produced silence, which reads exactly like the packet never
+  arriving. The trace handlers are attached unconditionally and guard on `IsEnabled(Trace)`, which is
+  what lets tracing be turned on mid-call from the settings UI instead of via a restart that drops the
+  registration and the call being investigated.
 - Registrars echo the stored binding in their `200 OK` `Contact` — the fastest way to confirm what address
   the trunk will actually dial.
 - Useful reachability check that needs no second phone: send a SIP `OPTIONS` to the *public* IP from the LAN.
@@ -159,14 +172,29 @@ stage and copies them into the API's `wwwroot`. One container, one port, one ori
   mapping, and don't add a second timestamp column to sort by instead.
 - SQLite won't create missing parent directories — `Program.EnsureDatabase` handles it; keep that when
   touching startup.
-- Runtime data (`CallTree.Api/data/` — db + recordings) is gitignored; recordings root is config
-  (`Storage:RecordingsRoot`).
+- Runtime data (`CallTree.Api/data/` — db + recordings + `config.json`) is gitignored; recordings root and
+  config file path are themselves config (`Storage:RecordingsRoot`, `Storage:ConfigFile`).
+- **Never write `Trunk:Password` into `config.json` unless one was actually supplied.** A key present with
+  an empty value overrides the same key from user secrets or the environment, so a save of any unrelated
+  field would blank a working credential. `SettingsDocument.Apply` treats a null password as "unchanged";
+  the UI sends null when the box is empty and the API never returns the current value.
 - **Never let a locally staged `wwwroot` reach the Docker build.** `.dockerignore` excludes
   `CallTree.Core/CallTree.Api/wwwroot/` for a reason: if it arrives in the build stage, `dotnet publish`
   precompresses it to `.br`/`.gz`, and those survive the later `COPY` of the freshly built UI — `COPY`
   overwrites files but never removes them. The container then serves a stale compressed copy to any
   browser sending `Accept-Encoding`, while an uncompressed `curl` sees the correct page. Observed once
   already; that is why the exclusion is there.
+- **`wwwroot` must exist at build time or the app will not start in Development.** It holds the built UI,
+  which only the container build produces, so it is gitignored and absent from a clean clone — but the
+  build still emits a static web assets manifest naming it, and in Development the host reads that
+  manifest *inside* `WebApplication.CreateBuilder`. A missing directory is an unhandled
+  `DirectoryNotFoundException` before a line of `Program.Main` runs, so no runtime guard can help. The
+  `EnsureWebRoot` target in `CallTree.Api.csproj` creates it; don't remove it.
+- **The unprefixed environment source is the one to insert the config file before.** The host adds
+  `ASPNETCORE_` and `DOTNET_` `EnvironmentVariablesConfigurationSource`s *before* the appsettings files,
+  so matching on type alone puts `config.json` underneath `appsettings.json`. The failure is quiet and
+  partial — keys absent from appsettings appear to save correctly while keys present there are ignored,
+  which looks like a flaky writer rather than an ordering bug. Match on `{ Prefix: null or "" }`.
 - **The SPA fallback must not swallow `/api`.** `MapFallbackToFile` catches everything, so an unknown API
   path would answer `200 text/html` and callers would fail later at `JSON.parse` instead of seeing a 404.
   `app.Map("/api/{**path}", ...)` returns a proper 404 ahead of the fallback; controllers are more

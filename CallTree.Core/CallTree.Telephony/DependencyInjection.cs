@@ -2,6 +2,8 @@ using CallTree.Telephony.Audio;
 using CallTree.Telephony.Configuration;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 
 namespace CallTree.Telephony;
 
@@ -11,6 +13,13 @@ public static class DependencyInjection
     {
         services.Configure<TrunkOptions>(configuration.GetSection(TrunkOptions.SectionName));
         services.Configure<TelephonyOptions>(configuration.GetSection(TelephonyOptions.SectionName));
+
+        // Registered after the rules built from the Logging section, which is what lets Telephony:TraceSip
+        // win over an explicit level for the SIP trace category. Configuration is captured rather than
+        // resolved so this does not depend on IConfiguration being in the container.
+        services.AddSingleton<IConfigureOptions<LoggerFilterOptions>>(new SipTraceLogLevel(configuration));
+
+        services.AddSingleton<TelephonySettingsWatcher>();
         services.AddSingleton<PromptLibrary>();
         services.AddHostedService<TelephonyBackgroundService>();
 
