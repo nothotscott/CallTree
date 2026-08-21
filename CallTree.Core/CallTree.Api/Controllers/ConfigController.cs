@@ -53,7 +53,7 @@ public class ConfigController(
             return ValidationProblem(ModelState);
         }
 
-        var telephony = SettingsDocument.Apply(telephonyOptions.CurrentValue, update.Telephony);
+        var telephony = SettingsDocument.Apply(telephonyOptions.CurrentValue, update.Telephony, update.OutboundPin);
         var trunk = SettingsDocument.Apply(trunkOptions.CurrentValue, update.Trunk, update.TrunkPassword);
 
         // Computed before the write, because the file watcher reloads configuration asynchronously:
@@ -85,6 +85,13 @@ public class ConfigController(
                 + "including the dial-plan probes that scanners aim at any open SIP port.");
         }
 
+        if (update.OutboundPin is { Length: 0 })
+        {
+            logger.LogWarning(
+                "Telephony:OutboundPin was cleared - the outbound path now answers and records on a caller ID "
+                + "match alone, and caller ID is trivially spoofable.");
+        }
+
         return Ok(Describe(telephony, trunk, pendingRestartKeys));
     }
 
@@ -100,6 +107,7 @@ public class ConfigController(
             Telephony = SettingsDocument.ToSettings(telephony),
             Trunk = SettingsDocument.ToSettings(trunk),
             TrunkPasswordSet = trunk.Password.Length > 0,
+            OutboundPinSet = telephony.OutboundPin.Length > 0,
             TrunkConfigured = trunk.IsConfigured,
             // A key the environment supplies cannot be waiting on a restart: restarting would read the
             // same environment again. Saying otherwise would send the operator to bounce the service

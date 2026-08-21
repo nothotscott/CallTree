@@ -47,8 +47,43 @@ public sealed record TelephonyOptions
     /// <summary>The digit an inbound caller must press to get past the spam gate.</summary>
     public byte ScreeningDigit { get; init; } = 1;
 
-    /// <summary>How long to wait for that digit before screening the caller out.</summary>
+    /// <summary>
+    /// How long to wait for that digit before screening the caller out. Also the deadline for
+    /// <see cref="OutboundPin"/>.
+    /// </summary>
     public int ScreeningTimeoutSeconds { get; init; } = 12;
+
+    /// <summary>
+    /// Optional PIN the Outbound (my cell) path must key in before it is answered and recorded. Blank
+    /// means caller ID alone is enough.
+    /// </summary>
+    /// <remarks>
+    /// Caller ID is trivially spoofable and this is the path that answers automatically and records, so
+    /// without a PIN anyone willing to forge a From header can make this instance record them. Today
+    /// that costs disk; once Phase 4 can place an outbound leg it costs a phone bill, which is why the
+    /// setting exists before it is needed. Left blank by default so bringing the phase up does not
+    /// require deciding this first — see TODO.md.
+    /// </remarks>
+    public string OutboundPin { get; init; } = "";
+
+    /// <summary>
+    /// How long received audio is held back so out-of-order RTP can be put right before it is written.
+    /// Reordering only; nothing here is played out, so this costs latency in the file, not in the call.
+    /// </summary>
+    public int JitterBufferMilliseconds { get; init; } = 60;
+
+    /// <summary>
+    /// Interval between recording-notice tones, or 0 for none.
+    /// </summary>
+    /// <remarks>
+    /// On the Outbound path the spoken notice only reaches the operator: the third party is merged in
+    /// later by the mobile handset, and CallTree is never told it happened. A periodic tone is therefore
+    /// the only disclosure this path can make mechanically to that party — everything else has to be
+    /// said out loud by the operator. It is off by default because the wording, the mechanism, and
+    /// whether one-party consent is even sufficient are open legal decisions for the operator; see the
+    /// consent note in CLAUDE.md. The tone is sent, not received, so it does not appear in the recording.
+    /// </remarks>
+    public int RecordingToneIntervalSeconds { get; init; }
 
     /// <summary>
     /// Also listen for SIP over TCP on <see cref="SipListenPort"/>. Outbound registration stays on UDP;

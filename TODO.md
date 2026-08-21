@@ -15,7 +15,14 @@ real to render.
       `tools/generate-prompts.ps1`. The current greeting ("This call will be recorded") is a placeholder
       chosen to err toward disclosing. Recording law varies by jurisdiction and several require *all*
       parties to consent — this is a decision the operator has to make, not one to inherit from a default.
-- [ ] Replace the synthesised placeholder prompts with real recordings.
+- [ ] Decide whether to enable the **recording tone** (`Telephony:RecordingToneIntervalSeconds`, off by
+      default) and at what interval. This is the *only* disclosure the outbound path can make to the
+      party added by the handset's three-way merge: they never hear `recording-notice.wav`, because
+      CallTree is not told the merge happened. Out of the box, telling them is the operator's job and
+      has to be done out loud.
+- [ ] Replace the synthesised placeholder prompts with real recordings. Six now, not three —
+      `recording-notice` and `pin-request` were added in Phase 3, and `recording-tone` is a generated
+      1400 Hz tone rather than speech.
 
 ## Security — before Phase 4
 
@@ -35,14 +42,28 @@ real to render.
 
 ## Phase 3 — Outbound-source path + mono recording
 
-- [ ] Auto-answer calls classified `Outbound` (caller ID matches the configured mobile) and record:
-      G.711 → PCM decode, jitter buffer (~60 ms), paced 20 ms write clock with silence-fill for gaps,
-      NAudio `WaveFileWriter`.
-- [ ] Finalize the WAV on hangup; persist `Recording` (path, duration, size, `FinalizedAt`).
-- [ ] Decide: caller-ID match alone, or caller ID plus a DTMF PIN, before recording starts. Caller ID is
-      trivially spoofable and this path auto-answers and records.
-- [ ] The consent disclosure decision is needed by here — spoken notice, periodic tone, or both, and on
-      which paths.
+**Written and unit-tested; not yet validated over the trunk.** The RTP tap, the DTMF PIN entry and the
+new prompts have never run against a real call — only against unit tests that feed the recorder packets
+directly. This phase is not done until a real call has been placed.
+
+- [x] Auto-answer calls classified `Outbound` (caller ID matches the configured mobile) and record:
+      G.711 → PCM decode, reordering buffer (`Telephony:JitterBufferMilliseconds`, 60 ms), silence-fill
+      for gaps, NAudio `WaveFileWriter`.
+      **Deviation from the original plan:** there is no paced 20 ms write clock. The RTP timestamp *is*
+      the sample clock for PCMU, so the file is written from it directly — no drift against the sender,
+      and gaps are exactly as long as the packets that went missing. A wall clock would have to be
+      reconciled with the RTP clock anyway, and would compress or stretch the recording when they differ.
+      Phase 5 is the case that genuinely needs one, because two legs have two unrelated RTP clocks.
+- [x] Finalize the WAV on hangup; persist `Recording` (path, duration, size, `FinalizedAt`).
+- [x] Decide: caller-ID match alone, or caller ID plus a DTMF PIN, before recording starts. Built as
+      `Telephony:OutboundPin`, **blank by default** so the phase can be brought up without settling it.
+      A failed PIN lands the call in `ScreenedOut`, so a spoofing attempt is distinguishable in the log
+      from a call that simply finished. Still worth an explicit decision before Phase 4.
+- [ ] **Validate by phone**: call the DID from the mobile, confirm the notice plays, hang up, and check
+      the WAV plays back at the right length with both sides audible after a three-way merge.
+- [ ] The consent disclosure decision is still open — see Immediate. The mechanisms now exist
+      (`recording-notice.wav`, and a periodic tone via `Telephony:RecordingToneIntervalSeconds`); what
+      is undecided is the wording, the interval, and whether a tone is required at all.
 
 ## Phase 4 — Inbound bridge
 
@@ -62,7 +83,9 @@ real to render.
 ## Phase 5 — Bridged-call recording
 
 - [ ] Tap the decoded PCM of each leg into one stereo WAV (left = caller, right = the mobile) on a shared
-      20 ms clock.
+      20 ms clock. `CallRecorder` cannot be reused as-is: it writes from the RTP timestamp, and two legs
+      have two unrelated RTP clocks with nothing to align them to. This is the case that needs the wall
+      clock Phase 3 did without.
 
 ## Phase 6 — Trunk resilience
 
@@ -73,7 +96,9 @@ real to render.
       `SIPRegistrationUserAgent` overload (AOR, realm, contact URI, custom headers). Only needed for
       providers that split the SIP and auth usernames.
 - [ ] Startup sweep to repair unfinalized WAVs — recompute the RIFF sizes from the file length and close the
-      `FinalizedAt` gap left by a crash mid-write.
+      `FinalizedAt` gap left by a crash mid-write. Less urgent than it was: `CallRecorder` re-patches the
+      header every five seconds, so a killed process leaves a file that plays up to the last flush. What
+      the sweep still fixes is the `Recording` row with a null `FinalizedAt`, and the last few seconds.
 - [ ] `Telephony:PublicHost` is a static value. Residential IPs change; switch to a DDNS hostname or
       discover the public address at startup via SIPSorcery's `STUNClient` and re-check it periodically.
 
@@ -103,8 +128,9 @@ show.
 - [x] Scaffold the project (`sv create`, minimal template, prettier + eslint + tailwind).
 - [x] Call log at `/calls`: paginated table, source and status filters, filter state in the URL. Reads
       `GET /api/calls` through the Vite dev proxy, so it is same-origin with no CORS.
-- [x] Settings page at `/settings`: edits the Telephony and Trunk sections, marks the fields an
-      environment variable is overriding, and reports which saved keys are waiting on a restart.
+- [x] Settings page at `/settings`: edits the Telephony, Recording and Trunk sections, marks the fields
+      an environment variable is overriding, and reports which saved keys are waiting on a restart. The
+      trunk password and the outbound PIN are both write-only.
 - [x] Telephony status at `/status`: registration state, the registrar's failure message and the binding
       it echoed back, plus warnings for the failures that otherwise present identically (no public host,
       no DID filter, missing prompts, settings waiting on a restart). Polls every 5 s.
@@ -113,7 +139,8 @@ show.
 - [ ] Live call state on the status page — there is no runtime call registry until Phase 4's
       `CallSession`/`ActiveCallRegistry`, so "is a call up right now" cannot be answered yet.
 - [ ] Call detail view, once the detail endpoint exists.
-- [ ] Recording player, once Phase 3 produces recordings.
+- [ ] Recording player. Phase 3 produces recordings now, so what is missing is the streaming endpoint
+      (with range support) rather than the data.
 - [x] Decide how the UI reaches the API in production: **same-origin**, served by the ASP.NET host from
       `wwwroot`. No CORS policy exists or is needed. Revisit only if SSR becomes worth a second container.
 - [x] Replace `@sveltejs/adapter-auto` with a concrete adapter — now `adapter-static` in SPA mode.
@@ -127,9 +154,12 @@ show.
 
 ## Open decisions
 
-1. Consent disclosure approach and wording — needed by Phase 3.
-2. Outbound-path authentication: caller-ID match only, or caller ID plus a PIN. A PIN is the safer default
-   given how easily caller ID is spoofed.
+1. Consent disclosure approach and wording, and whether to turn the periodic tone on. The mechanisms are
+   built; what they say and when is not decided.
+2. Outbound-path authentication: caller-ID match only, or caller ID plus a PIN. Both are now supported —
+   `Telephony:OutboundPin`, blank by default — so this is a configuration decision rather than a build
+   one. A PIN is the safer default given how easily caller ID is spoofed, and it matters much more once
+   Phase 4 can place an outbound leg.
 3. Retention policy — Phase 8.
 4. API and UI exposure and authentication — Phases 7–8. Recordings are sensitive; the default posture is
    LAN-only with no external exposure. Note the UI and API now share one port, so exposing one exposes

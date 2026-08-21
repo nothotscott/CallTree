@@ -16,6 +16,22 @@ public static class PromptNames
 
     /// <summary>Played when the caller presses nothing, or the wrong key.</summary>
     public const string Rejected = "rejected";
+
+    /// <summary>
+    /// Played to the Outbound-source caller before recording starts. This is the disclosure the operator
+    /// hears; the party they merge in afterwards never hears it, because the merge happens on the handset
+    /// and CallTree is not told about it. See <c>Telephony:RecordingToneIntervalSeconds</c>.
+    /// </summary>
+    public const string RecordingNotice = "recording-notice";
+
+    /// <summary>Asks the Outbound-source caller for the PIN. Only used when one is configured.</summary>
+    public const string PinRequest = "pin-request";
+
+    /// <summary>
+    /// Short tone repeated during recording, when an interval is configured. Unlike the spoken notice
+    /// this is audible to anyone merged into the call later.
+    /// </summary>
+    public const string RecordingTone = "recording-tone";
 }
 
 /// <summary>
@@ -29,8 +45,15 @@ public static class PromptNames
 /// </remarks>
 public sealed class PromptLibrary
 {
+    /// <summary>
+    /// Prompts every deployment needs. <see cref="PromptNames.PinRequest"/> and
+    /// <see cref="PromptNames.RecordingTone"/> are left out because they belong to features that are off
+    /// unless configured; warning about them unconditionally would train the operator to ignore the
+    /// warning that matters. <see cref="PromptNames.RecordingNotice"/> is in the list precisely because
+    /// it must never go missing quietly.
+    /// </summary>
     private static readonly string[] RequiredPrompts =
-        [PromptNames.Greeting, PromptNames.Accepted, PromptNames.Rejected];
+        [PromptNames.Greeting, PromptNames.Accepted, PromptNames.Rejected, PromptNames.RecordingNotice];
 
     private readonly Dictionary<string, PcmAudio> _prompts = new(StringComparer.OrdinalIgnoreCase);
     private readonly ILogger<PromptLibrary> _logger;

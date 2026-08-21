@@ -1,5 +1,14 @@
-namespace CallTree.Infrastructure.Configuration;
+namespace CallTree.Application.Configuration;
 
+/// <summary>
+/// Where this instance keeps its own files.
+/// </summary>
+/// <remarks>
+/// In Application rather than Infrastructure because two layers read it and neither may reference the
+/// other: Infrastructure owns the database, Telephony writes the recordings. Binding the one section
+/// twice into two option types would put the same setting in two places, which is exactly the trap the
+/// SIP-trace log level used to be in.
+/// </remarks>
 public sealed class StorageOptions
 {
     public const string SectionName = "Storage";

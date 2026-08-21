@@ -1,6 +1,6 @@
 using System.Text.Json;
 using System.Text.Json.Nodes;
-using CallTree.Infrastructure.Configuration;
+using CallTree.Application.Configuration;
 
 namespace CallTree.Api.Settings;
 

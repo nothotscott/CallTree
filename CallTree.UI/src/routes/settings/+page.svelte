@@ -23,6 +23,12 @@
 	/** Empty means "leave the configured password alone"; it is never sent in that case. */
 	let password = $state('');
 
+	// The PIN needs a switch as well as a box, because blank has to keep meaning "unchanged" — without
+	// the switch there would be no way to express "turn the gate off" at all.
+	let pinRequired = $state(false);
+	let pin = $state('');
+	let pinError = $state<string | null>(null);
+
 	let saving = $state(false);
 	let saved = $state(false);
 	let errors = $state<FieldErrors>({});
@@ -40,6 +46,9 @@
 		telephony = next ? { ...next.telephony } : null;
 		trunk = next ? { ...next.trunk } : null;
 		password = '';
+		pinRequired = next?.outboundPinSet ?? false;
+		pin = '';
+		pinError = null;
 		errors = {};
 		saveError = null;
 		saved = false;
@@ -56,10 +65,21 @@
 		event.preventDefault();
 		if (!telephony || !trunk) return;
 
+		// Asking for a PIN without ever supplying one would save nothing and leave the switch claiming
+		// a gate that is not there - worse than refusing, because the operator would believe it.
+		pinError =
+			pinRequired && !settings?.outboundPinSet && pin.length === 0
+				? 'Enter the PIN you want to require.'
+				: null;
+		if (pinError) return;
+
 		saving = true;
 		saved = false;
 		errors = {};
 		saveError = null;
+
+		// Null leaves the PIN alone; an empty string is the only way to say "remove it".
+		const sentPin = pinRequired ? (pin.length > 0 ? pin : null) : '';
 
 		try {
 			const saveResult = await saveSettings({
@@ -67,13 +87,22 @@
 				trunk,
 				// Omitted unless one was typed. The API treats null as "unchanged", which is what keeps
 				// a password set from user secrets or the environment from being blanked by a save.
-				trunkPassword: password.length > 0 ? password : null
+				trunkPassword: password.length > 0 ? password : null,
+				outboundPin: sentPin
 			});
 
 			settings = saveResult;
 			telephony = { ...saveResult.telephony };
 			trunk = { ...saveResult.trunk };
 			password = '';
+			pin = '';
+
+			// Set from what was sent, not from the response. When the PIN was not part of this save the
+			// response can still describe the configuration as it was before it — the file the API just
+			// wrote is reloaded asynchronously — and adopting that would flip the switch off on its own.
+			// The next save would then send an empty PIN and genuinely remove the gate.
+			if (sentPin !== null) pinRequired = sentPin.length > 0;
+
 			saved = true;
 		} catch (cause) {
 			if (cause instanceof SettingsSaveError) {
@@ -207,7 +236,7 @@
 						{@render notes('Telephony:SipListenPort', 'Must match the router port forward.')}
 					</label>
 
-					<label class="flex items-center gap-2 pt-6 text-sm">
+					<label class="flex gap-2 pt-6 text-sm">
 						<input type="checkbox" bind:checked={telephony.listenOnTcp} class="rounded" />
 						<span class="font-medium text-slate-700">Also listen on TCP</span>
 					</label>
@@ -254,6 +283,78 @@
 						)}
 					</span>
 				</label>
+			</fieldset>
+
+			<fieldset
+				disabled={saving}
+				class="space-y-4 rounded-lg border border-slate-200 bg-white p-5 shadow-sm"
+			>
+				<legend class="px-1 text-sm font-semibold text-slate-900">Recording</legend>
+				<p class="text-xs text-slate-500">
+					Applies to calls from your own number, which are answered automatically and recorded. You
+					add the other party with your phone’s three-way merge, so they never hear the spoken
+					notice — telling them is on you, unless you turn on the tone below.
+				</p>
+
+				<label class="flex items-start gap-2 text-sm">
+					<input type="checkbox" bind:checked={pinRequired} class="mt-0.5 rounded" />
+					<span>
+						<span class="font-medium text-slate-700">Require a PIN</span>
+						{@render notes(
+							'Telephony:OutboundPin',
+							'Caller ID alone is trivially spoofable, and this path answers and records without asking. Turning this off saves an empty PIN, which removes the gate.'
+						)}
+					</span>
+				</label>
+
+				{#if pinRequired}
+					<label class="block text-sm">
+						<span class="font-medium text-slate-700">PIN</span>
+						<input
+							type="password"
+							inputmode="numeric"
+							bind:value={pin}
+							class={inputClass}
+							autocomplete="new-password"
+							placeholder={settings.outboundPinSet ? 'unchanged' : 'digits only'}
+						/>
+						<span class="mt-1 block text-xs text-slate-500">
+							Write-only, like the trunk password: the current value is never sent to this page.
+							Keyed in on the phone, so digits only; end with # if it is shorter than expected.
+						</span>
+						{#if pinError}
+							<span class="mt-1 block text-xs font-medium text-rose-600">{pinError}</span>
+						{/if}
+					</label>
+				{/if}
+
+				<div class="grid gap-4 sm:grid-cols-2">
+					<label class="block text-sm">
+						<span class="font-medium text-slate-700">Recording tone interval (seconds)</span>
+						<input
+							type="number"
+							bind:value={telephony.recordingToneIntervalSeconds}
+							class={inputClass}
+						/>
+						{@render notes(
+							'Telephony:RecordingToneIntervalSeconds',
+							'0 for none. The only notice a merged-in party hears; consent law varies and several places need every party to agree.'
+						)}
+					</label>
+
+					<label class="block text-sm">
+						<span class="font-medium text-slate-700">Jitter buffer (ms)</span>
+						<input
+							type="number"
+							bind:value={telephony.jitterBufferMilliseconds}
+							class={inputClass}
+						/>
+						{@render notes(
+							'Telephony:JitterBufferMilliseconds',
+							'How long received audio is held so out-of-order packets can be put right. Delays the file, not the call.'
+						)}
+					</label>
+				</div>
 			</fieldset>
 
 			<fieldset

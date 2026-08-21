@@ -15,18 +15,17 @@ namespace CallTree.Infrastructure.Persistence.Migrations
         protected override void BuildModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
-            modelBuilder.HasAnnotation("ProductVersion", "10.0.9");
+            modelBuilder.HasAnnotation("ProductVersion", "10.0.10");
 
             modelBuilder.Entity("CallTree.Domain.Calls.Call", b =>
                 {
                     b.Property<Guid>("Id")
-                        .ValueGeneratedOnAdd()
                         .HasColumnType("TEXT");
 
-                    b.Property<DateTimeOffset?>("AnsweredAt")
+                    b.Property<string>("AnsweredAt")
                         .HasColumnType("TEXT");
 
-                    b.Property<DateTimeOffset?>("EndedAt")
+                    b.Property<string>("EndedAt")
                         .HasColumnType("TEXT");
 
                     b.Property<string>("Source")
@@ -37,7 +36,8 @@ namespace CallTree.Infrastructure.Persistence.Migrations
                         .IsRequired()
                         .HasColumnType("TEXT");
 
-                    b.Property<DateTimeOffset>("StartedAt")
+                    b.Property<string>("StartedAt")
+                        .IsRequired()
                         .HasColumnType("TEXT");
 
                     b.Property<string>("Status")
@@ -60,23 +60,23 @@ namespace CallTree.Infrastructure.Persistence.Migrations
             modelBuilder.Entity("CallTree.Domain.Calls.CallLeg", b =>
                 {
                     b.Property<Guid>("Id")
-                        .ValueGeneratedOnAdd()
                         .HasColumnType("TEXT");
 
-                    b.Property<DateTimeOffset?>("AnsweredAt")
+                    b.Property<string>("AnsweredAt")
                         .HasColumnType("TEXT");
 
                     b.Property<Guid?>("CallId")
                         .HasColumnType("TEXT");
 
-                    b.Property<DateTimeOffset>("CreatedAt")
+                    b.Property<string>("CreatedAt")
+                        .IsRequired()
                         .HasColumnType("TEXT");
 
                     b.Property<string>("Direction")
                         .IsRequired()
                         .HasColumnType("TEXT");
 
-                    b.Property<DateTimeOffset?>("EndedAt")
+                    b.Property<string>("EndedAt")
                         .HasColumnType("TEXT");
 
                     b.Property<string>("HangupInitiator")
@@ -106,7 +106,6 @@ namespace CallTree.Infrastructure.Persistence.Migrations
             modelBuilder.Entity("CallTree.Domain.Calls.Recording", b =>
                 {
                     b.Property<Guid>("Id")
-                        .ValueGeneratedOnAdd()
                         .HasColumnType("TEXT");
 
                     b.Property<Guid?>("CallId")
@@ -116,7 +115,8 @@ namespace CallTree.Infrastructure.Persistence.Migrations
                         .IsRequired()
                         .HasColumnType("TEXT");
 
-                    b.Property<DateTimeOffset>("CreatedAt")
+                    b.Property<string>("CreatedAt")
+                        .IsRequired()
                         .HasColumnType("TEXT");
 
                     b.Property<double?>("DurationSeconds")
@@ -127,7 +127,7 @@ namespace CallTree.Infrastructure.Persistence.Migrations
                         .HasMaxLength(1024)
                         .HasColumnType("TEXT");
 
-                    b.Property<DateTimeOffset?>("FinalizedAt")
+                    b.Property<string>("FinalizedAt")
                         .HasColumnType("TEXT");
 
                     b.Property<long?>("SizeBytes")

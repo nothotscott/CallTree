@@ -112,9 +112,48 @@ public class SettingsDocumentTests
     {
         var options = new TelephonyOptions { DidNumber = "+15550002222", ScreeningTimeoutSeconds = 30 };
 
-        var applied = SettingsDocument.Apply(options, SettingsDocument.ToSettings(options));
+        var applied = SettingsDocument.Apply(options, SettingsDocument.ToSettings(options), outboundPin: null);
 
         Assert.Equal(options, applied);
+    }
+
+    [Fact]
+    public void Applying_telephony_settings_keeps_the_current_pin_when_none_is_given()
+    {
+        // Same trap as the trunk password: a save of any unrelated field must not turn off the gate on
+        // the path that answers automatically and records.
+        var current = new TelephonyOptions { OutboundPin = "4821", DidNumber = "+15550002222" };
+
+        var applied = SettingsDocument.Apply(
+            current,
+            SettingsDocument.ToSettings(current) with { ScreeningTimeoutSeconds = 20 },
+            outboundPin: null);
+
+        Assert.Equal("4821", applied.OutboundPin);
+        Assert.Equal(20, applied.ScreeningTimeoutSeconds);
+    }
+
+    [Fact]
+    public void An_empty_pin_is_an_explicit_instruction_to_turn_the_gate_off()
+    {
+        var current = new TelephonyOptions { OutboundPin = "4821" };
+
+        var applied = SettingsDocument.Apply(current, SettingsDocument.ToSettings(current), outboundPin: "");
+
+        Assert.Equal("", applied.OutboundPin);
+    }
+
+    [Fact]
+    public void The_pin_is_only_written_to_the_document_when_one_is_supplied()
+    {
+        var document = new JsonObject
+        {
+            ["Telephony"] = new JsonObject { ["OutboundPin"] = "4821" },
+        };
+
+        SettingsDocument.Apply(document, Update());
+
+        Assert.Equal("4821", (string?)document["Telephony"]!["OutboundPin"]);
     }
 
     [Fact]

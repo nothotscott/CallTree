@@ -43,6 +43,17 @@ public sealed record TelephonySettings
 
     [Range(1, 300)]
     public int ScreeningTimeoutSeconds { get; init; } = 12;
+
+    /// <summary>Reordering window for received RTP before it is written to a recording.</summary>
+    [Range(0, 1000)]
+    public int JitterBufferMilliseconds { get; init; } = 60;
+
+    /// <summary>
+    /// Seconds between recording-notice tones, or 0 for none. The only disclosure the Outbound path can
+    /// make to a party merged in by the handset — see the consent note in TODO.md.
+    /// </summary>
+    [Range(0, 600)]
+    public int RecordingToneIntervalSeconds { get; init; }
 }
 
 /// <summary>
@@ -80,6 +91,15 @@ public sealed record SettingsUpdate
     /// is written to the config file verbatim.
     /// </summary>
     public string? TrunkPassword { get; init; }
+
+    /// <summary>
+    /// The Outbound-path PIN, handled exactly like <see cref="TrunkPassword"/>: null leaves it alone,
+    /// an empty string turns the PIN off. It is a credential, so it is never returned — only reported
+    /// as set. Digits only, because it is entered on a phone keypad.
+    /// </summary>
+    [RegularExpression("^[0-9]*$", ErrorMessage = "The PIN must be digits only - it is keyed in on a phone.")]
+    [StringLength(12)]
+    public string? OutboundPin { get; init; }
 }
 
 /// <summary>The effective configuration, plus what the operator needs to know to trust it.</summary>
@@ -91,6 +111,12 @@ public sealed record SettingsResponse
 
     /// <summary>Whether a trunk password is configured. The value itself is never sent.</summary>
     public required bool TrunkPasswordSet { get; init; }
+
+    /// <summary>
+    /// Whether the Outbound path is gated by a PIN. The value itself is never sent. False means caller
+    /// ID alone decides who gets answered and recorded on that path.
+    /// </summary>
+    public required bool OutboundPinSet { get; init; }
 
     /// <summary>Whether the trunk has enough configuration for the SIP stack to register at all.</summary>
     public required bool TrunkConfigured { get; init; }

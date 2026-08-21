@@ -28,7 +28,7 @@ potential phone bill.
 Only providers whose published ranges could be verified directly. **Trim these to the regions you actually
 use** — there is no reason to accept SIP from Sydney if your trunk terminates in Virginia.
 
-### Telnyx — verified 2026-07-31 from <https://sip.telnyx.com/>
+### Telnyx — verified 2026-08-21 from <https://sip.telnyx.com/>
 
 Signalling, by region: US `192.76.120.10`, `64.16.250.10` · Canada `192.76.120.31`, `64.16.250.13` ·
 Europe `185.246.41.140`, `185.246.41.141` · Middle East `185.246.42.128`, `185.246.42.129` ·
@@ -36,6 +36,10 @@ Australia `103.115.244.145`, `103.115.244.146` · Asia `103.115.244.158`, `103.1
 
 Media subnets are the `36.255.198.128/25` … `185.246.42.128/28` entries. Telnyx uses RTP ports
 16384–32768 outbound; that only constrains their side, not the range you listen on.
+
+Telnyx emailed on 2026-08-21 announcing a new media range, `103.115.247.0/24`, superseding the
+narrower `103.115.247.128/27` this list previously carried — that /27 is a subset of the new /24, so
+it was replaced rather than kept alongside it.
 
 ### Twilio Elastic SIP Trunking — verified 2026-07-31 from <https://www.twilio.com/docs/sip-trunking/ip-addresses>
 

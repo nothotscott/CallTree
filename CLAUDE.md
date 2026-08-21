@@ -21,8 +21,12 @@ Naming note: `Outbound`/`Inbound` are **business** classifications; both start a
 
 ## Status
 
-Phases 0–2 complete and validated by real phone calls. Phase 3 (Outbound-source path + mono recording) is
-the next *telephony* phase and is blocked on the consent-disclosure decision — see the legal note below.
+Phases 0–2 complete and validated by real phone calls. **Phase 3 (Outbound-source path + mono recording)
+is written and unit-tested but has NOT been validated by phone** — the seam that has never run is
+SIPSorcery's `OnRtpPacketReceived` delivering real PCMU into `CallRecorder`, plus PIN entry and the new
+prompts. Do not treat it as done, and do not start Phase 4, until a real call has been placed and the WAV
+played back. The consent-disclosure decision is still open; Phase 3 ships the *mechanisms* (a spoken
+notice, and a periodic tone that is off by default) without deciding them.
 
 **Current work is the frontend, taken ahead of Phase 3 deliberately.** Phase numbers are not being
 renumbered; they are referenced throughout TODO/PROGRESS. Note that a recordings browser needs Phase 7's
@@ -41,9 +45,11 @@ CallTree/
 ├── tools/                   # generate-prompts.ps1
 ├── CallTree.Core/           # backend (.NET 10, CallTree.Core.slnx)
 │   ├── CallTree.Domain/         # aggregates, VOs, enums, domain events — no dependencies
-│   ├── CallTree.Application/    # ports (ICallRepository), CallLifecycleService, call commands
+│   ├── CallTree.Application/    # ports (ICallRepository), CallLifecycleService, call commands,
+│   │                            #   StorageOptions (shared by Infrastructure and Telephony)
 │   ├── CallTree.Infrastructure/ # EF Core + SQLite (CallTreeDbContext, migrations, CallRepository)
 │   ├── CallTree.Telephony/      # SIPSorcery + NAudio; TelephonyBackgroundService owns the SIP UA
+│   │                            #   Audio/ holds prompts, the G.711 decode and the recording pipeline
 │   ├── CallTree.Api/            # ASP.NET Core host; DI wiring; /health; Scalar at /scalar (dev)
 │   │                            #   Settings/ owns the writable config file the UI edits
 │   └── CallTree.Tests/          # xUnit v3 — pure-logic tests only (state machine, PhoneNumber, WAV logic)
@@ -64,10 +70,19 @@ Dependency direction: `Api → {Telephony, Infrastructure} → Application → D
   scoped and telephony callbacks are long-lived, so there is no ambient scope to join — but that plumbing
   belongs in one place, not at every call site.
 - "Recording" is a fact (`Recording` entity), never a `CallStatus`.
+- **`CallStatus.Screening` means "this caller is being gated"**, on either path — the inbound press-1
+  spam gate, or the Outbound path's optional PIN. `Call.Answer` takes `requireScreening` from the caller
+  rather than deriving it from `Source`, which is what lets a failed PIN land in `ScreenedOut` instead of
+  looking like a call that simply finished. Don't push the gate back outside the state machine.
 - **Reads and writes use separate ports.** `ICallRepository` loads whole aggregates to mutate and save;
   `ICallQueries` returns flat, untracked read models (`CallSummary`) for display. API responses are read
   models, never the aggregate — exposing `Call` would freeze the transition surface into the HTTP contract.
 - Bridging (RTP payload relay) and recording (decoded PCM tap) are separate concerns — don't conflate.
+- **`Storage` is bound in `AddApplication`**, and `StorageOptions` lives in Application, because
+  Infrastructure resolves the database directory from it while Telephony resolves the recordings root and
+  neither layer may reference the other. Don't "tidy" it back into Infrastructure and bind the same
+  section into a second options type — one setting in two places is exactly the trap `Telephony:TraceSip`
+  used to be in.
 - Enums persist as strings; timestamps are `DateTimeOffset` passed explicitly into domain methods (testability).
 - Trunk credentials/config live in options bound from configuration, never in the DB or the domain.
 - **Configuration is three layers**: `appsettings.json` < `Storage:ConfigFile` (`data/config.json`, what
@@ -162,7 +177,32 @@ stage and copies them into the API's `wwwroot`. One container, one port, one ori
 - Restricting the audio formats to PCMU does **not** disable DTMF: `MediaStream` adds the RFC 4733
   telephone-event payload (101) separately from the negotiated codec list.
 - A single DTMF keypress raises `OnDtmfTone` more than once (the tone spans several RTP packets). Latch the
-  first tone or you will process one keypress as several.
+  first tone or you will process one keypress as several. **For multi-digit entry latching is not enough**
+  — `PinGate` debounces instead: a repeat of the *same* digit within 250 ms is the same keypress. The
+  repeats are RFC 4733's three end-of-event retransmissions, so they arrive a packet interval apart while
+  a human pressing a digit twice cannot come close. Without it a PIN of 1112 collapses to 12.
+- **The RTP timestamp is the recording's clock, not a wall clock.** For PCMU it counts samples at 8 kHz,
+  so it states where each packet belongs; writing packets back-to-back compresses every pause, and pacing
+  off a wall clock drifts against the sender. `CallRecorder` writes from the timestamp and fills gaps with
+  real silence. Two consequences that must not be "simplified away": gaps over 10 s are treated as a
+  discontinuity and resynchronised (one bogus timestamp would otherwise allocate gigabytes of silence),
+  and timestamp comparisons are signed so the 32-bit wrap doesn't reorder anything. Phase 5's stereo
+  recording is the case that genuinely needs a shared wall clock — two legs, two unrelated RTP clocks.
+- **Filter the RTP payload type before decoding.** Payload 101 (RFC 4733 telephone-event) shares the
+  session with PCMU; decoding it as audio writes a burst of noise into the recording on every keypress.
+- **G.711 code 0x7F decodes to 0 here, not −1.** NAudio's `MuLawDecoder` table says −1 for that
+  "negative zero" code; the ITU reference expansion computes 0, and so does `G711`. Inaudible either way,
+  but `G711Tests` asserts the whole 256-code table against NAudio *except* this one so the disagreement
+  reads as intentional rather than as a bug found later.
+- **`FinalizeRecording` must keep touching only the `Recording` entity.** It runs concurrently with the
+  hangup handler's `EndCall` in a separate DI scope; because the `Call` row has no changed columns, EF
+  emits no `UPDATE` for it and cannot overwrite the terminal status with a stale one. Adding a `Call`
+  mutation to that path reintroduces the race silently.
+- **Never write `Telephony:OutboundPin` unless one was supplied** — same rule and same reasoning as the
+  trunk password. The settings UI also needs the switch beside the field: "blank means unchanged" leaves
+  no way to express "remove the gate", and the PUT response's `outboundPinSet` can briefly describe the
+  pre-save configuration (the file it just wrote reloads asynchronously), so the UI sets the switch from
+  what it *sent*, never from the response.
 - Keep log message strings ASCII. Em-dashes render as mojibake in consoles that aren't UTF-8.
 - **SQLite cannot ORDER BY a `DateTimeOffset`**, and every timestamp in this project is one. EF throws
   outright on ordering ("SQLite does not support expressions of type 'DateTimeOffset' in ORDER BY
@@ -212,6 +252,11 @@ stage and copies them into the API's `wwwroot`. One container, one port, one ori
 - **Legal: recording consent varies by jurisdiction**, and several require *all* parties to consent rather
   than one. The disclosure approach is an open decision for the operator — never silently drop or
   "simplify away" disclosure prompts or tones once they exist, and never assume one jurisdiction's rules.
+  Specific to the Outbound path: `recording-notice.wav` reaches **only the operator**. The third party is
+  merged in by the handset and CallTree is never told, so no prompt can ever reach them —
+  `Telephony:RecordingToneIntervalSeconds` is the only disclosure available to that party, and it is off
+  by default. Say so plainly whenever this path is discussed; it is a property of the design, not a bug
+  to be quietly fixed, and an operator who assumes the notice is heard by everyone is exposed.
 
 ## Testing philosophy
 

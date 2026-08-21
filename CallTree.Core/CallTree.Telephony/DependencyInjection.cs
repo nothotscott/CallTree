@@ -23,6 +23,7 @@ public static class DependencyInjection
         services.AddSingleton<TelephonySettingsWatcher>();
         services.AddSingleton<TelephonyStatus>();
         services.AddSingleton<PromptLibrary>();
+        services.AddSingleton<RecordingStore>();
         services.AddHostedService<TelephonyBackgroundService>();
 
         return services;

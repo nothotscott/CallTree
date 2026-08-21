@@ -44,7 +44,21 @@ public sealed class ScopedCallCommands(IServiceScopeFactory scopeFactory) : ICal
         switch (command)
         {
             case AnswerCall answer:
-                await lifecycle.AnswerAsync(answer.CallId, answer.When, cancellationToken);
+                await lifecycle.AnswerAsync(answer.CallId, answer.When, answer.RequireScreening, cancellationToken);
+                break;
+
+            case PassScreening passed:
+                await lifecycle.PassScreeningAsync(passed.CallId, passed.When, cancellationToken);
+                break;
+
+            case StartRecording start:
+                await lifecycle.StartRecordingAsync(
+                    start.CallId, start.RelativePath, start.ChannelLayout, start.When, cancellationToken);
+                break;
+
+            case FinalizeRecording finalize:
+                await lifecycle.FinalizeRecordingAsync(
+                    finalize.CallId, finalize.DurationSeconds, finalize.SizeBytes, finalize.When, cancellationToken);
                 break;
 
             case RecordScreeningOutcome screening:

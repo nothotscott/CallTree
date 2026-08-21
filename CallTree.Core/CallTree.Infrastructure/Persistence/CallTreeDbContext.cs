@@ -20,6 +20,12 @@ public class CallTreeDbContext(DbContextOptions<CallTreeDbContext> options) : Db
         modelBuilder.Entity<Call>(call =>
         {
             call.HasKey(c => c.Id);
+            // Every Id in this model is assigned client-side (Guid.NewGuid() in the domain constructor),
+            // never by the database. Without this, EF's default heuristic for a Guid key with a non-default
+            // value treats an entity discovered via navigation fix-up (e.g. a Recording attached to an
+            // already-tracked Call outside the initial AddAsync graph) as pre-existing and emits an UPDATE
+            // instead of an INSERT - which affects 0 rows and throws DbUpdateConcurrencyException.
+            call.Property(c => c.Id).ValueGeneratedNever();
             call.Ignore(c => c.DomainEvents);
             call.Property(c => c.Source).HasConversion<string>();
             call.Property(c => c.SourceClassification).HasConversion<string>();
@@ -44,6 +50,7 @@ public class CallTreeDbContext(DbContextOptions<CallTreeDbContext> options) : Db
         modelBuilder.Entity<CallLeg>(leg =>
         {
             leg.HasKey(l => l.Id);
+            leg.Property(l => l.Id).ValueGeneratedNever();
             leg.Property(l => l.Direction).HasConversion<string>();
             leg.Property(l => l.HangupInitiator).HasConversion<string>();
             leg.Property(l => l.RawCallerId).HasMaxLength(256);
@@ -56,6 +63,7 @@ public class CallTreeDbContext(DbContextOptions<CallTreeDbContext> options) : Db
         modelBuilder.Entity<Recording>(recording =>
         {
             recording.HasKey(r => r.Id);
+            recording.Property(r => r.Id).ValueGeneratedNever();
             recording.Property(r => r.ChannelLayout).HasConversion<string>();
             recording.Property(r => r.FilePath).HasMaxLength(1024);
         });

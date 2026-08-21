@@ -22,7 +22,7 @@ public class CallStateMachineTests
         var call = StartInbound();
         Assert.Equal(CallStatus.Ringing, call.Status);
 
-        call.Answer(T0.AddSeconds(2));
+        call.Answer(T0.AddSeconds(2), requireScreening: true);
         Assert.Equal(CallStatus.Screening, call.Status);
 
         call.BeginDialing(MyCell, "sip-call-id-out", T0.AddSeconds(10));
@@ -46,7 +46,7 @@ public class CallStateMachineTests
     public void CompleteScreening_ends_a_passed_call_without_bridging()
     {
         var call = StartInbound();
-        call.Answer(T0.AddSeconds(2));
+        call.Answer(T0.AddSeconds(2), requireScreening: true);
 
         call.CompleteScreening(T0.AddSeconds(9), "screening passed (pressed 1)");
 
@@ -60,7 +60,7 @@ public class CallStateMachineTests
     public void CompleteScreening_is_only_legal_while_screening()
     {
         var call = StartOutboundSource();
-        call.Answer(T0.AddSeconds(1));
+        call.Answer(T0.AddSeconds(1), requireScreening: false);
 
         Assert.Throws<InvalidOperationException>(() => call.CompleteScreening(T0.AddSeconds(5), "nope"));
     }
@@ -70,16 +70,52 @@ public class CallStateMachineTests
     {
         var call = StartOutboundSource();
 
-        call.Answer(T0.AddSeconds(1));
+        call.Answer(T0.AddSeconds(1), requireScreening: false);
 
         Assert.Equal(CallStatus.InProgress, call.Status);
+    }
+
+    [Fact]
+    public void Outbound_source_with_a_pin_is_screened_before_it_proceeds()
+    {
+        var call = StartOutboundSource();
+
+        call.Answer(T0.AddSeconds(1), requireScreening: true);
+        Assert.Equal(CallStatus.Screening, call.Status);
+
+        call.PassScreening(T0.AddSeconds(6));
+
+        Assert.Equal(CallStatus.InProgress, call.Status);
+        Assert.Equal(T0.AddSeconds(1), call.AnsweredAt);
+    }
+
+    [Fact]
+    public void A_failed_pin_lands_in_screened_out_rather_than_completed()
+    {
+        // The point of gating the Outbound path through Screening: a spoofed caller ID that fails the
+        // PIN has to be distinguishable in the call log from a call that simply finished.
+        var call = StartOutboundSource();
+        call.Answer(T0.AddSeconds(1), requireScreening: true);
+
+        call.ScreenOut(T0.AddSeconds(14), "wrong PIN");
+
+        Assert.Equal(CallStatus.ScreenedOut, call.Status);
+    }
+
+    [Fact]
+    public void PassScreening_is_only_legal_while_screening()
+    {
+        var call = StartOutboundSource();
+        call.Answer(T0.AddSeconds(1), requireScreening: false);
+
+        Assert.Throws<InvalidOperationException>(() => call.PassScreening(T0.AddSeconds(5)));
     }
 
     [Fact]
     public void ScreenOut_only_allowed_while_screening()
     {
         var call = StartInbound();
-        call.Answer(T0.AddSeconds(1));
+        call.Answer(T0.AddSeconds(1), requireScreening: true);
 
         call.ScreenOut(T0.AddSeconds(30), "no digit pressed");
 
@@ -90,7 +126,7 @@ public class CallStateMachineTests
     public void MarkMissed_records_unanswered_outbound_leg()
     {
         var call = StartInbound();
-        call.Answer(T0.AddSeconds(1));
+        call.Answer(T0.AddSeconds(1), requireScreening: true);
         call.BeginDialing(MyCell, "sip-call-id-out", T0.AddSeconds(5));
 
         call.MarkMissed(T0.AddSeconds(35), "cell did not answer");
@@ -109,8 +145,8 @@ public class CallStateMachineTests
         Assert.Throws<InvalidOperationException>(() => call.BeginDialing(MyCell, "x", T0));
         Assert.Throws<InvalidOperationException>(() => call.StartRecording("x.wav", ChannelLayout.Mono, T0));
 
-        call.Answer(T0);
-        Assert.Throws<InvalidOperationException>(() => call.Answer(T0));
+        call.Answer(T0, requireScreening: true);
+        Assert.Throws<InvalidOperationException>(() => call.Answer(T0, requireScreening: true));
     }
 
     [Fact]
@@ -127,7 +163,7 @@ public class CallStateMachineTests
     public void Recording_finalization_is_one_shot()
     {
         var call = StartOutboundSource();
-        call.Answer(T0);
+        call.Answer(T0, requireScreening: false);
         var recording = call.StartRecording("rec.wav", ChannelLayout.Mono, T0);
 
         recording.MarkFinalized(120.5, 1_928_000, T0.AddMinutes(2));
@@ -137,10 +173,29 @@ public class CallStateMachineTests
     }
 
     [Fact]
+    public void FinalizeRecording_tolerates_being_called_twice_or_with_no_recording()
+    {
+        // Both the hangup path and the error path reach it, and losing the call's terminal state over a
+        // duplicate bookkeeping call would be the worse failure.
+        var call = StartOutboundSource();
+        call.Answer(T0, requireScreening: false);
+
+        call.FinalizeRecording(1, 1, T0.AddSeconds(30));
+        Assert.Null(call.Recording);
+
+        call.StartRecording("rec.wav", ChannelLayout.Mono, T0);
+        call.FinalizeRecording(30, 480_000, T0.AddSeconds(30));
+        call.FinalizeRecording(99, 99, T0.AddSeconds(31));
+
+        Assert.Equal(30, call.Recording!.DurationSeconds);
+        Assert.Equal(T0.AddSeconds(30), call.Recording.FinalizedAt);
+    }
+
+    [Fact]
     public void Transitions_raise_domain_events()
     {
         var call = StartInbound();
-        call.Answer(T0);
+        call.Answer(T0, requireScreening: true);
         call.BeginDialing(MyCell, "x", T0);
         call.Bridge(T0);
         call.Complete(T0);

@@ -124,6 +124,7 @@
 						<th scope="col" class="px-4 py-3 font-medium">Status</th>
 						<th scope="col" class="px-4 py-3 text-right font-medium">Duration</th>
 						<th scope="col" class="px-4 py-3 font-medium">Outcome</th>
+						<th scope="col" class="px-4 py-3 font-medium">Recording</th>
 					</tr>
 				</thead>
 				<tbody class="divide-y divide-slate-100">
@@ -163,10 +164,22 @@
 							>
 								{call.terminationReason ?? '—'}
 							</td>
+							<td class="px-4 py-3 whitespace-nowrap">
+								{#if call.recordingId}
+									<a
+										href={resolve('/recordings/[id]', { id: call.recordingId })}
+										class="font-medium text-sky-700 hover:text-sky-900"
+									>
+										▶ Listen
+									</a>
+								{:else}
+									<span class="text-slate-400">—</span>
+								{/if}
+							</td>
 						</tr>
 					{:else}
 						<tr>
-							<td colspan="6" class="px-4 py-10 text-center text-slate-500"> No calls to show. </td>
+							<td colspan="7" class="px-4 py-10 text-center text-slate-500"> No calls to show. </td>
 						</tr>
 					{/each}
 				</tbody>

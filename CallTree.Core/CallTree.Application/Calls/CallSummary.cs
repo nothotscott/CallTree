@@ -43,7 +43,8 @@ public sealed record CallSummary
             ? Math.Round((ended - answered).TotalSeconds, 3)
             : null;
 
-    public required bool HasRecording { get; init; }
+    /// <summary>Id of the recording, when one exists — the caller navigates to /recording/{id} with it.</summary>
+    public Guid? RecordingId { get; init; }
 
     /// <summary>Length of the recording, when one exists and was finalized.</summary>
     public double? RecordingDurationSeconds { get; init; }
@@ -66,7 +67,7 @@ public sealed record CallSummary
             AnsweredAt = call.AnsweredAt,
             EndedAt = call.EndedAt,
             TerminationReason = call.TerminationReason,
-            HasRecording = call.Recording is not null,
+            RecordingId = call.Recording?.Id,
             RecordingDurationSeconds = call.Recording?.DurationSeconds,
         };
     }

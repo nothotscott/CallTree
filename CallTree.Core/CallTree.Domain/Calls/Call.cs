@@ -9,8 +9,12 @@ namespace CallTree.Domain.Calls;
 ///
 /// State machine:
 ///   Ringing → InProgress                        (Outbound source: answer = start talking)
+///   Ringing → Screening → InProgress            (Outbound source with a PIN configured)
 ///   Ringing → Screening → Dialing → InProgress  (Inbound source: IVR gate, then bridge to cell)
 ///   Terminal: Completed, ScreenedOut, Missed, Failed
+///
+/// Screening means "this caller is being gated", whichever path they are on — which is what lets a
+/// failed PIN land in ScreenedOut rather than looking like a completed call in the log.
 /// </summary>
 public class Call : AggregateRoot
 {
@@ -61,10 +65,19 @@ public class Call : AggregateRoot
         return call;
     }
 
-    public void Answer(DateTimeOffset when)
+    /// <summary>
+    /// The caller is connected to us.
+    /// </summary>
+    /// <param name="requireScreening">
+    /// Whether the caller still has to get past a gate before the call proper begins. Inbound callers
+    /// always do (the press-1 spam gate); an Outbound-source caller only does when a PIN is configured,
+    /// which is why the decision is the caller's to state rather than something derived from
+    /// <see cref="Source"/> here.
+    /// </param>
+    public void Answer(DateTimeOffset when, bool requireScreening)
     {
         EnsureStatus(CallStatus.Ringing);
-        Status = Source == CallSource.Inbound ? CallStatus.Screening : CallStatus.InProgress;
+        Status = requireScreening ? CallStatus.Screening : CallStatus.InProgress;
         AnsweredAt = when;
         InboundLeg.MarkAnswered(when);
         Raise(new CallAnswered(Id));
@@ -90,6 +103,18 @@ public class Call : AggregateRoot
         Raise(new CallBridged(Id));
     }
 
+    /// <summary>
+    /// The caller cleared the gate and the call continues on this leg — the Outbound (my cell) path,
+    /// where the caller is already the party to record and there is nothing to dial. The Inbound path
+    /// goes through <see cref="BeginDialing"/> and <see cref="Bridge"/> instead.
+    /// </summary>
+    public void PassScreening(DateTimeOffset when)
+    {
+        EnsureStatus(CallStatus.Screening);
+        Status = CallStatus.InProgress;
+        AnsweredAt ??= when;
+    }
+
     public Recording StartRecording(string filePath, ChannelLayout channelLayout, DateTimeOffset when)
     {
         EnsureStatus(CallStatus.InProgress);
@@ -100,6 +125,21 @@ public class Call : AggregateRoot
 
         Recording = new Recording(filePath, channelLayout, when);
         return Recording;
+    }
+
+    /// <summary>
+    /// Closes out the recording once the file is on disk and its length is known. Tolerates a call with
+    /// no recording, and one already finalized, because the hangup and error paths both reach here and
+    /// losing the call's terminal state over a bookkeeping detail would be the worse failure.
+    /// </summary>
+    public void FinalizeRecording(double durationSeconds, long sizeBytes, DateTimeOffset when)
+    {
+        if (Recording is null || Recording.FinalizedAt is not null)
+        {
+            return;
+        }
+
+        Recording.MarkFinalized(durationSeconds, sizeBytes, when);
     }
 
     public void Complete(DateTimeOffset when, string? reason = null)

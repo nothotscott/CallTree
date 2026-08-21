@@ -62,9 +62,17 @@ goes empty on one dropped request is worse than one that says "last refresh fail
 
 The settings page (`/settings`) is the one place that writes:
 
-- **The trunk password is write-only.** The API never sends it, only `trunkPasswordSet`. Send
-  `trunkPassword: null` when the field is blank — an empty string would be written to the config file
-  and would then override a password coming from user secrets or the environment.
+- **Two secrets are write-only**, the trunk password and the outbound PIN. The API never sends either,
+  only `trunkPasswordSet` / `outboundPinSet`. Send `null` when the field is blank — an empty string would
+  be written to the config file and would then override a value coming from user secrets or the
+  environment.
+- **The PIN needs the switch as well as the field.** Because blank has to keep meaning "unchanged", an
+  empty string is the only way to say "remove the gate", and there is no way to type that. Hence the
+  "Require a PIN" checkbox: unchecked sends `''`. And after a save the switch is set from what was
+  _sent_, never from the response — when the PIN was not part of the save, the response can still
+  describe the pre-save configuration, because the file the API just wrote reloads asynchronously.
+  Adopting that would flip the switch off on its own, and the next save would then genuinely clear the
+  PIN on the path that answers automatically and records.
 - **Two spellings of the same key.** Configuration keys use a colon (`Telephony:SipListenPort`, which is
   also how you would spell it as an environment variable); validation errors use the C# property path
   with a dot. `errorsFor`/`includesKey` normalise, so a field carries one key rather than two.

@@ -52,6 +52,21 @@ export function formatRelative(iso: string | null, now: number = Date.now()): st
 	return relativeFormat.format(Math.round(delta), 'year');
 }
 
+/** "1.2 MB", "340 KB", etc. A dash while a recording hasn't finalized (size isn't known until then). */
+export function formatBytes(bytes: number | null): string {
+	if (bytes === null || !Number.isFinite(bytes) || bytes < 0) return '—';
+	if (bytes < 1024) return `${bytes} B`;
+
+	const units = ['KB', 'MB', 'GB'];
+	let value = bytes / 1024;
+	let unitIndex = 0;
+	while (value >= 1024 && unitIndex < units.length - 1) {
+		value /= 1024;
+		unitIndex++;
+	}
+	return `${value.toFixed(value >= 10 ? 0 : 1)} ${units[unitIndex]}`;
+}
+
 /** Groups an E.164 NANP number for readability; anything else is shown as-is. */
 export function formatPhoneNumber(e164: string | null): string | null {
 	if (!e164) return null;

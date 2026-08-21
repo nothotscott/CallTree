@@ -4,9 +4,9 @@ The web frontend for [CallTree](../README.md) — a browser for recorded calls. 
 (Svelte 5, TypeScript, Tailwind 4).
 
 > **Status: early.** Three pages work: `/calls` (paginated, filterable call log), `/status` (trunk
-> registration and the SIP stack's live state), and `/settings` (trunk and telephony configuration). A
-> recording player needs recordings, which the backend does not produce yet (Phase 3); a call detail view
-> needs a detail endpoint. See [`../TODO.md`](../TODO.md).
+> registration and the SIP stack's live state), and `/settings` (telephony, recording and trunk
+> configuration). A recording player needs an endpoint that streams the files with range support; a call
+> detail view needs a detail endpoint. Neither exists yet. See [`../TODO.md`](../TODO.md).
 >
 > This is a single-page app with no server-side rendering, so there is no `+page.server.ts` and no form
 > actions — see [AGENTS.md](AGENTS.md#how-this-ships).

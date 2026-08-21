@@ -12,6 +12,9 @@
 
   <ItemGroup>
     <PackageReference Include="Microsoft.Extensions.DependencyInjection.Abstractions" Version="10.0.10" />
+    <!-- services.Configure<StorageOptions>(section): the shared storage settings are bound here because
+         both Infrastructure and Telephony read them and neither may reference the other. -->
+    <PackageReference Include="Microsoft.Extensions.Options.ConfigurationExtensions" Version="10.0.10" />
   </ItemGroup>
 
 </Project>

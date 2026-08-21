@@ -1,9 +1,7 @@
 using CallTree.Application.Calls;
 using CallTree.Telephony.Audio;
 using Microsoft.Extensions.Logging;
-using SIPSorcery.Media;
 using SIPSorcery.SIP.App;
-using SIPSorceryMedia.Abstractions;
 
 namespace CallTree.Telephony;
 
@@ -17,8 +15,7 @@ namespace CallTree.Telephony;
 /// </remarks>
 internal sealed class ScreeningGate(
     SIPUserAgent userAgent,
-    AudioExtrasSource audioSource,
-    PromptLibrary prompts,
+    PromptPlayer prompts,
     byte expectedDigit,
     TimeSpan timeout,
     ILogger logger)
@@ -42,7 +39,7 @@ internal sealed class ScreeningGate(
             using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             deadline.CancelAfter(timeout);
 
-            await PlayAsync(PromptNames.Greeting, firstDigit.Task, deadline.Token);
+            await prompts.PlayAsync(PromptNames.Greeting, firstDigit.Task, deadline.Token);
 
             // The prompt may have finished before the caller pressed anything; keep listening until the
             // deadline. Barge-in during the prompt already resolved the task, so this returns immediately.
@@ -51,7 +48,7 @@ internal sealed class ScreeningGate(
             if (digit is null)
             {
                 logger.LogInformation("Call {CallId}: no digit within {Timeout:0.#}s - screened out", callId, timeout.TotalSeconds);
-                await PlayAsync(PromptNames.Rejected, interrupt: null, cancellationToken);
+                await prompts.PlayAsync(PromptNames.Rejected, interrupt: null, cancellationToken);
                 return (ScreeningOutcome.TimedOut, null);
             }
 
@@ -59,58 +56,23 @@ internal sealed class ScreeningGate(
             {
                 logger.LogInformation("Call {CallId}: expected {Expected} but got {Digit} - screened out",
                     callId, Describe(expectedDigit), Describe(digit.Value));
-                await PlayAsync(PromptNames.Rejected, interrupt: null, cancellationToken);
+                await prompts.PlayAsync(PromptNames.Rejected, interrupt: null, cancellationToken);
                 return (ScreeningOutcome.WrongDigit, digit);
             }
 
             logger.LogInformation("Call {CallId}: caller pressed {Digit} - screening passed", callId, Describe(digit.Value));
-            await PlayAsync(PromptNames.Accepted, interrupt: null, cancellationToken);
+            await prompts.PlayAsync(PromptNames.Accepted, interrupt: null, cancellationToken);
             return (ScreeningOutcome.Passed, digit);
         }
         finally
         {
             userAgent.OnDtmfTone -= OnDtmf;
-            audioSource.CancelSendAudioFromStream();
-        }
-    }
-
-    /// <summary>
-    /// Plays a prompt, stopping early if <paramref name="interrupt"/> completes or the call drops.
-    /// </summary>
-    private async Task PlayAsync(string name, Task? interrupt, CancellationToken cancellationToken)
-    {
-        if (!prompts.TryGet(name, out var prompt) || !userAgent.IsCallActive)
-        {
-            return;
-        }
-
-        var rate = prompt.SampleRate == 16000
-            ? AudioSamplingRatesEnum.Rate16KHz
-            : AudioSamplingRatesEnum.Rate8KHz;
-
-        using var stream = new MemoryStream(prompt.Samples, writable: false);
-        var playback = audioSource.SendAudioFromStream(stream, rate);
-
-        var stop = interrupt is null
-            ? WhenCancelled(cancellationToken)
-            : Task.WhenAny(interrupt, WhenCancelled(cancellationToken));
-
-        if (await Task.WhenAny(playback, stop) != playback)
-        {
-            audioSource.CancelSendAudioFromStream();
+            prompts.Cancel();
         }
     }
 
     private static async Task<byte?> WaitForDigitAsync(Task<byte> digit, CancellationToken cancellationToken) =>
-        await Task.WhenAny(digit, WhenCancelled(cancellationToken)) == digit ? await digit : null;
-
-    /// <summary>A task that completes (never faults) when the token is cancelled.</summary>
-    private static Task WhenCancelled(CancellationToken cancellationToken)
-    {
-        var tcs = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        cancellationToken.Register(() => tcs.TrySetResult());
-        return tcs.Task;
-    }
+        await Task.WhenAny(digit, PromptPlayer.WhenCancelled(cancellationToken)) == digit ? await digit : null;
 
     /// <summary>RFC 4733 event IDs: 0–9 are the digits, 10 is '*', 11 is '#'.</summary>
     private static string Describe(byte tone) => tone switch

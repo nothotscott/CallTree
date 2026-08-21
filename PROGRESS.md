@@ -79,6 +79,103 @@ end to end.
 - **Verified locally** with a scripted caller sending real RFC 4733 DTMF: PCMU negotiated, non-silent RTP
   received (so the prompt genuinely streamed), and all three outcomes landing correctly in SQLite.
 
+## Phase 3 — Recording calls from my own number ⚠️ (built and unit-tested, not yet validated by phone)
+
+Calls classified `Outbound` are answered, optionally gated by a PIN, and recorded to a mono 16-bit WAV.
+Only received audio is captured, which is the whole design: the operator adds the other party with the
+handset's own three-way merge, so by the time it matters this single leg already carries both voices.
+
+**Not yet validated over the trunk.** The unit tests feed `CallRecorder` packets directly; the seam that
+has never run is the one in between — SIPSorcery's `OnRtpPacketReceived` delivering real PCMU. Until a
+real call has been placed and the file played back, this phase is not finished.
+
+### The RTP timestamp is the clock
+
+The original plan called for a paced 20 ms write clock. There isn't one, and the reason is worth keeping:
+for PCMU the RTP timestamp *counts samples at 8 kHz*, so it is already the sender's sample clock and says
+exactly where every packet belongs. Writing packets back to back as they arrive would silently compress
+every pause in the conversation; pacing off a wall clock instead would drift whenever the two clocks
+disagree, and would still need reconciling against the timestamps. Writing from the timestamp directly
+means gaps are *measurable*, and they are filled with real silence so the recording stays in step with
+what was said.
+
+Two guards fall out of that:
+
+- A timestamp jump larger than ten seconds is treated as a discontinuity — a clock reset, a stray packet
+  from an old stream — and resynchronised rather than filled. Without the cap, one bogus timestamp asks
+  for however many gigabytes of silence it implies.
+- A packet that arrives after its place in the file has been written is dropped and counted. A WAV cannot
+  be inserted into; dropping costs 20 ms, rewinding would corrupt everything after it.
+
+Timestamps are compared as signed differences throughout, so the 32-bit wrap (about six days of
+continuous audio) reorders nothing.
+
+Phase 5 cannot reuse this. Two legs have two unrelated RTP clocks with nothing to align them to, which is
+the case that genuinely needs the shared wall clock this phase did without.
+
+### The rest of the pipeline
+
+- **`RtpJitterBuffer` is a reordering buffer, not a playout buffer.** A softphone needs a playout clock
+  because it has a speaker to feed; a recorder has no deadline. So the release rule is depth-based: a
+  frame is handed on once a frame at least `Telephony:JitterBufferMilliseconds` newer has arrived, which
+  is the point after which nothing earlier can still be expected.
+- **`G711` is written out rather than taken from NAudio**, since understanding the wire format is half
+  the point of the project, and the test asserts it against NAudio's decoder for all 256 codes — the
+  whole input domain, so nothing is left to sample. That turned up a genuine disagreement: NAudio's table
+  decodes 0x7F, the negative-zero code, to −1 where the ITU reference expansion computes 0. One LSB on a
+  code that means zero, inaudible either way, but a table that cannot represent silence as silence is the
+  wrong one to inherit. The test pins the difference down so it is not rediscovered as a bug.
+- **Non-PCMU payloads are ignored at the door.** Payload 101 shares the RTP session; decoding the RFC
+  4733 telephone-event stream as audio would write a burst of noise into the recording on every keypress.
+- **The header is re-patched every five seconds.** A process killed mid-call then leaves a file that
+  still plays up to the last flush, instead of one that every tool reads as empty. Asserted by a test
+  that reads the file while the recorder still holds it open.
+- **Finalizing cannot race the hangup.** `FinalizeRecording` touches only the `Recording` entity, so EF
+  emits no `UPDATE` for the `Call` row and cannot overwrite the terminal status that the hangup handler
+  is writing concurrently in its own scope.
+
+### The PIN, and what Screening now means
+
+`Telephony:OutboundPin` gates the recording path, blank by default. Caller ID is trivially forged, and
+this is the path that answers automatically and records without asking; today that costs disk, but once
+Phase 4 can place an outbound leg the same forgery costs money.
+
+`Call.Answer` now takes `requireScreening` rather than deriving it from `Source`, so `Screening` means
+"this caller is being gated" on either path. That is what lets a failed PIN land in `ScreenedOut` — a
+spoofing attempt is distinguishable in the call log from a call that simply finished, which it would not
+be if the gate lived outside the state machine. `Call.PassScreening` covers the Outbound case where the
+caller clears the gate and there is nothing to dial.
+
+Multi-digit entry needs a debounce the single-digit gate did not: one keypress raises `OnDtmfTone`
+several times because RFC 4733 retransmits the end-of-event packet three times. Those repeats arrive
+within a packet interval or two, so a repeat of the same digit inside 250 ms counts as one keypress —
+which is what stops a PIN like 1112 collapsing to 12.
+
+### Disclosure, and the gap that cannot be closed in software
+
+`recording-notice.wav` plays before the recorder opens, so the disclosure never lands inside the file it
+is disclosing. But it reaches **only the operator**: the third party is merged in by the handset, and
+CallTree is never told it happened. No prompt can reach them.
+
+The only mechanical disclosure available on this path is a periodic tone, added as
+`Telephony:RecordingToneIntervalSeconds` (a generated 1400 Hz tone, sent not received, so it does not
+appear in the recording). It is **off by default**, because the wording, the interval and whether
+one-party consent is even sufficient are legal decisions for the operator — see TODO.md. What is built
+is the mechanism, not the answer.
+
+### Elsewhere
+
+- `StorageOptions` moved from Infrastructure to Application: Infrastructure owns the database and
+  Telephony writes the recordings, neither may reference the other, and binding one section into two
+  option types would put the same setting in two places.
+- `RecordingStore` groups files by month and names them `<utc-timestamp>-<call-id>.wav`, storing a
+  forward-slashed relative path so a database written on Windows still resolves in the container. It also
+  owns the traversal check for Phase 7's streaming endpoint, next to the path construction rather than
+  wherever gets there first.
+- `PromptPlayer` was extracted from `ScreeningGate` before `PinGate` copied it a second time.
+- The settings page grew a Recording section. The PIN is write-only like the trunk password, with a
+  switch beside it, because "blank means unchanged" leaves no way to express "turn the gate off".
+
 ## Cross-cutting work
 
 - **Call commands.** Telephony describes what happened as a `CallCommand` and hands it to `ICallCommands`,

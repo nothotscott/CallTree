@@ -15,7 +15,26 @@ namespace CallTree.Application.Calls;
 public abstract record CallCommand(Guid CallId, DateTimeOffset When);
 
 /// <summary>An answered call: the caller is now connected to us.</summary>
-public sealed record AnswerCall(Guid CallId, DateTimeOffset When)
+/// <param name="RequireScreening">
+/// Whether a gate still stands between the caller and the call proper — always true for the inbound
+/// spam gate, true on the Outbound path only when a PIN is configured.
+/// </param>
+public sealed record AnswerCall(Guid CallId, DateTimeOffset When, bool RequireScreening)
+    : CallCommand(CallId, When);
+
+/// <summary>
+/// The Outbound (my cell) caller cleared the PIN gate. There is nothing to dial — they are already the
+/// party being recorded — so the call simply proceeds.
+/// </summary>
+public sealed record PassScreening(Guid CallId, DateTimeOffset When)
+    : CallCommand(CallId, When);
+
+/// <summary>Recording has started; the file exists and is being written.</summary>
+public sealed record StartRecording(Guid CallId, DateTimeOffset When, string RelativePath, ChannelLayout ChannelLayout)
+    : CallCommand(CallId, When);
+
+/// <summary>The recording is closed and its length is known.</summary>
+public sealed record FinalizeRecording(Guid CallId, DateTimeOffset When, double DurationSeconds, long SizeBytes)
     : CallCommand(CallId, When);
 
 /// <summary>The IVR spam gate reached a verdict.</summary>

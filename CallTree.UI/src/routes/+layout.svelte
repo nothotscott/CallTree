@@ -14,6 +14,7 @@
 			<a href={resolve('/calls')} class="text-lg font-semibold tracking-tight">CallTree</a>
 			<nav class="flex gap-4 text-sm text-slate-600">
 				<a href={resolve('/calls')} class="hover:text-slate-900">Calls</a>
+				<a href={resolve('/recordings')} class="hover:text-slate-900">Recordings</a>
 				<a href={resolve('/status')} class="hover:text-slate-900">Status</a>
 				<a href={resolve('/settings')} class="hover:text-slate-900">Settings</a>
 			</nav>

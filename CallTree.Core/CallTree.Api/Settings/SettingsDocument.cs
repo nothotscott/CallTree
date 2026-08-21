@@ -28,6 +28,9 @@ public static class SettingsDocument
         $"{TelephonySection}:{nameof(TelephonyOptions.TraceSip)}",
         $"{TelephonySection}:{nameof(TelephonyOptions.ScreeningDigit)}",
         $"{TelephonySection}:{nameof(TelephonyOptions.ScreeningTimeoutSeconds)}",
+        $"{TelephonySection}:{nameof(TelephonyOptions.JitterBufferMilliseconds)}",
+        $"{TelephonySection}:{nameof(TelephonyOptions.RecordingToneIntervalSeconds)}",
+        $"{TelephonySection}:{nameof(TelephonyOptions.OutboundPin)}",
         $"{TrunkSection}:{nameof(TrunkOptions.Host)}",
         $"{TrunkSection}:{nameof(TrunkOptions.Port)}",
         $"{TrunkSection}:{nameof(TrunkOptions.Username)}",
@@ -48,6 +51,10 @@ public static class SettingsDocument
         TraceSip = options.TraceSip,
         ScreeningDigit = options.ScreeningDigit,
         ScreeningTimeoutSeconds = options.ScreeningTimeoutSeconds,
+        JitterBufferMilliseconds = options.JitterBufferMilliseconds,
+        RecordingToneIntervalSeconds = options.RecordingToneIntervalSeconds,
+        // OutboundPin is deliberately absent: it is a credential, and the response reports only whether
+        // one is set. See SettingsResponse.OutboundPinSet.
     };
 
     public static TrunkSettings ToSettings(TrunkOptions options) => new()
@@ -63,8 +70,11 @@ public static class SettingsDocument
     /// Applies the editable fields to the current options, leaving the rest as they are. Used to ask
     /// the settings watcher whether a save will need a restart, before it is written.
     /// </summary>
-    public static TelephonyOptions Apply(TelephonyOptions current, TelephonySettings settings) => current with
+    public static TelephonyOptions Apply(TelephonyOptions current, TelephonySettings settings, string? outboundPin) => current with
     {
+        OutboundPin = outboundPin ?? current.OutboundPin,
+        JitterBufferMilliseconds = settings.JitterBufferMilliseconds,
+        RecordingToneIntervalSeconds = settings.RecordingToneIntervalSeconds,
         MyCellNumber = settings.MyCellNumber,
         DidNumber = settings.DidNumber,
         PublicHost = settings.PublicHost,
@@ -104,6 +114,16 @@ public static class SettingsDocument
         telephony[nameof(TelephonyOptions.TraceSip)] = update.Telephony.TraceSip;
         telephony[nameof(TelephonyOptions.ScreeningDigit)] = update.Telephony.ScreeningDigit;
         telephony[nameof(TelephonyOptions.ScreeningTimeoutSeconds)] = update.Telephony.ScreeningTimeoutSeconds;
+        telephony[nameof(TelephonyOptions.JitterBufferMilliseconds)] = update.Telephony.JitterBufferMilliseconds;
+        telephony[nameof(TelephonyOptions.RecordingToneIntervalSeconds)] = update.Telephony.RecordingToneIntervalSeconds;
+
+        // Same rule as the trunk password: only written when one was actually supplied, so saving an
+        // unrelated field cannot silently disable the PIN gate on the path that answers automatically
+        // and records. An empty string is a deliberate "turn it off".
+        if (update.OutboundPin is not null)
+        {
+            telephony[nameof(TelephonyOptions.OutboundPin)] = update.OutboundPin;
+        }
 
         var trunk = Section(document, TrunkSection);
         trunk[nameof(TrunkOptions.Host)] = update.Trunk.Host;

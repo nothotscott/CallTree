@@ -1,8 +1,8 @@
 using System.Text.Json.Serialization;
 using CallTree.Api.Settings;
 using CallTree.Application;
+using CallTree.Application.Configuration;
 using CallTree.Infrastructure;
-using CallTree.Infrastructure.Configuration;
 using CallTree.Infrastructure.Persistence;
 using CallTree.Telephony;
 using Microsoft.Data.Sqlite;
@@ -33,7 +33,7 @@ namespace CallTree.Api
             builder.Services.AddOpenApi();
             builder.Services.AddHealthChecks();
 
-            builder.Services.AddApplication();
+            builder.Services.AddApplication(builder.Configuration);
             builder.Services.AddInfrastructure(builder.Configuration);
             builder.Services.AddTelephony(builder.Configuration);
 

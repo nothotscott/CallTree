@@ -1,5 +1,4 @@
 using CallTree.Application.Abstractions;
-using CallTree.Infrastructure.Configuration;
 using CallTree.Infrastructure.Persistence;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
@@ -17,7 +16,7 @@ public static class DependencyInjection
         services.AddDbContext<CallTreeDbContext>(options => options.UseSqlite(connectionString));
         services.AddScoped<ICallRepository, CallRepository>();
         services.AddScoped<ICallQueries, CallQueries>();
-        services.Configure<StorageOptions>(configuration.GetSection(StorageOptions.SectionName));
+        services.AddScoped<IRecordingQueries, RecordingQueries>();
 
         return services;
     }

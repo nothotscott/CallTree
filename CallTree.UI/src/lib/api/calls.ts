@@ -31,7 +31,8 @@ export interface CallSummary {
 	terminationReason: string | null;
 	durationSeconds: number | null;
 	talkTimeSeconds: number | null;
-	hasRecording: boolean;
+	/** Id of the recording, when one exists — links to /recording/{id}. */
+	recordingId: string | null;
 	recordingDurationSeconds: number | null;
 }
 

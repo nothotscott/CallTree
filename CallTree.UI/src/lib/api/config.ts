@@ -1,9 +1,9 @@
 /**
  * Mirrors the settings models exposed by CallTree.Api's ConfigController.
  *
- * The trunk password is write-only: it is never returned by the API, only reported as set or not.
- * Sending `trunkPassword: null` (or omitting it) leaves whatever is configured alone, which is what
- * lets this form save an unrelated field without ever holding the secret.
+ * Two fields are write-only: the trunk password and the outbound PIN. Neither is ever returned by the
+ * API, only reported as set or not. Sending `null` (or omitting them) leaves whatever is configured
+ * alone, which is what lets this form save an unrelated field without ever holding either secret.
  */
 
 export interface TelephonySettings {
@@ -17,6 +17,8 @@ export interface TelephonySettings {
 	traceSip: boolean;
 	screeningDigit: number;
 	screeningTimeoutSeconds: number;
+	jitterBufferMilliseconds: number;
+	recordingToneIntervalSeconds: number;
 }
 
 export interface TrunkSettings {
@@ -31,6 +33,8 @@ export interface SettingsResponse {
 	telephony: TelephonySettings;
 	trunk: TrunkSettings;
 	trunkPasswordSet: boolean;
+	/** Whether the outbound path is gated by a PIN. False means caller ID alone decides. */
+	outboundPinSet: boolean;
 	trunkConfigured: boolean;
 	/** Startup-only settings that have changed since the SIP stack started. */
 	pendingRestartKeys: string[];
@@ -46,6 +50,8 @@ export interface SettingsUpdate {
 	telephony: TelephonySettings;
 	trunk: TrunkSettings;
 	trunkPassword?: string | null;
+	/** Null leaves the PIN alone; an empty string turns the gate off. */
+	outboundPin?: string | null;
 }
 
 /** Validation errors keyed by the property path the API reports, e.g. `Trunk.Port`. */

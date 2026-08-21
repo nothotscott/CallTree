@@ -9,6 +9,7 @@ using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using SIPSorcery.Media;
+using SIPSorcery.Net;
 using SIPSorcery.SIP;
 using SIPSorcery.SIP.App;
 using SIPSorcery.Sys;
@@ -17,21 +18,25 @@ using SIPSorceryMedia.Abstractions;
 namespace CallTree.Telephony;
 
 /// <summary>
-/// Hosts the SIP user agent for the lifetime of the process.
-/// Phase 1: registers with the trunk (or test PBX extension), answers every inbound call
-/// with silence, logs it, holds 5 seconds, hangs up, and persists the Call aggregate.
+/// Hosts the SIP user agent for the lifetime of the process: registers with the trunk, rejects INVITEs
+/// not addressed to our DID, and handles the two call paths — the inbound press-1 spam gate, and the
+/// Outbound (my cell) path that answers automatically and records.
 /// </summary>
+/// <remarks>
+/// Per-call handling is still inline here. Phase 4 lifts it into a CallSession plus an active-call
+/// registry, which it needs anyway for a second concurrent call; doing it before there is a second leg
+/// to model would be guessing at the shape.
+/// </remarks>
 public class TelephonyBackgroundService(
     IOptionsMonitor<TrunkOptions> trunkOptions,
     IOptionsMonitor<TelephonyOptions> telephonyOptions,
     TelephonySettingsWatcher settingsWatcher,
     TelephonyStatus status,
     PromptLibrary prompts,
+    RecordingStore recordings,
     ICallCommands calls,
     ILoggerFactory loggerFactory) : BackgroundService
 {
-    private static readonly TimeSpan Phase1HoldDuration = TimeSpan.FromSeconds(5);
-
     private readonly ILogger _logger = loggerFactory.CreateLogger<TelephonyBackgroundService>();
     private SIPTransport? _sipTransport;
     private SIPRegistrationUserAgent? _registrationUserAgent;
@@ -454,27 +459,22 @@ public class TelephonyBackgroundService(
                 return;
             }
 
-            await calls.ExecuteAsync(new AnswerCall(callId, DateTimeOffset.UtcNow), stoppingToken);
+            var player = new PromptPlayer(audioSource, prompts, () => userAgent.IsCallActive);
+
+            // Inbound callers always face the spam gate. An Outbound-source caller only does when a PIN
+            // is configured, and the aggregate has to be told which, because Screening is the state that
+            // makes a refusal land in ScreenedOut rather than looking like a normal completed call.
+            var requireScreening = source == CallSource.Inbound || telephonyOptions.CurrentValue.OutboundPin.Length > 0;
+
+            await calls.ExecuteAsync(new AnswerCall(callId, DateTimeOffset.UtcNow, requireScreening), stoppingToken);
 
             if (source == CallSource.Inbound)
             {
-                await ScreenAsync(callId, userAgent, audioSource, EndOnceAsync, hangup.Token);
+                await ScreenAsync(callId, userAgent, player, EndOnceAsync, hangup.Token);
             }
             else
             {
-                // Phase 3 replaces this with auto-answer + recording for the Outbound (my cell) path.
-                _logger.LogInformation(
-                    "Call {CallId} answered; holding {Seconds}s of silence (outbound path is still the phase 1 stub)",
-                    callId, Phase1HoldDuration.TotalSeconds);
-                try
-                {
-                    await Task.Delay(Phase1HoldDuration, hangup.Token);
-                }
-                catch (OperationCanceledException)
-                {
-                }
-
-                await EndByHangupAsync(HangupInitiator.Local, "phase 1 auto-hangup");
+                await RecordOutboundSourceAsync(callId, userAgent, mediaSession, player, EndOnceAsync, hangup.Token);
             }
 
             // Stop the silence generator before tearing down, or its 20 ms timer fires once more against
@@ -501,11 +501,185 @@ public class TelephonyBackgroundService(
         }
     }
 
+    /// <summary>
+    /// The Outbound (my cell) path: optionally take a PIN, disclose that recording is starting, then
+    /// record everything received until the caller hangs up.
+    /// </summary>
+    /// <remarks>
+    /// Only received audio is captured, and that is the whole design: the operator adds the real party
+    /// with the handset's own three-way merge, so by the time it matters this single leg already carries
+    /// both voices mixed. It also means CallTree is never told the merge happened — which is why the
+    /// spoken notice below reaches only the operator, and why a periodic tone is the sole disclosure this
+    /// path can make to the party who joins later. See TelephonyOptions.RecordingToneIntervalSeconds.
+    /// </remarks>
+    private async Task RecordOutboundSourceAsync(
+        Guid callId,
+        SIPUserAgent userAgent,
+        NatAwareVoIPMediaSession mediaSession,
+        PromptPlayer player,
+        Func<CallCommand, string, Task> endOnceAsync,
+        CancellationToken cancellationToken)
+    {
+        var telephony = telephonyOptions.CurrentValue;
+
+        if (telephony.OutboundPin.Length > 0 && !await PassesPinAsync(callId, userAgent, player, telephony, endOnceAsync, cancellationToken))
+        {
+            return;
+        }
+
+        // Before the recorder opens, so the disclosure cannot end up inside the file it is disclosing.
+        await player.PlayAsync(PromptNames.RecordingNotice, interrupt: null, cancellationToken);
+
+        var startedAt = DateTimeOffset.UtcNow;
+        var location = recordings.Locate(callId, startedAt);
+
+        // Persisted first: StartRecording is only legal while the call is InProgress, so letting the
+        // aggregate refuse before a file exists avoids leaving an orphan WAV behind when the caller hung
+        // up in the last few milliseconds. The cost is the handful of packets that arrive meanwhile.
+        try
+        {
+            await calls.ExecuteAsync(new StartRecording(callId, startedAt, location.RelativePath, ChannelLayout.Mono));
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Call {CallId}: could not register a recording; continuing without one.", callId);
+            await WaitForHangupAsync(player, telephony.RecordingToneIntervalSeconds, cancellationToken);
+            return;
+        }
+
+        CallRecorder recorder;
+        try
+        {
+            recorder = new CallRecorder(
+                callId,
+                location.FullPath,
+                TimeSpan.FromMilliseconds(telephony.JitterBufferMilliseconds),
+                _logger);
+        }
+        catch (Exception ex)
+        {
+            // The row exists with no file and no FinalizedAt, which is exactly what the Phase 6 repair
+            // sweep looks for. Loud, because a recording call that records nothing is the worst outcome.
+            _logger.LogError(ex, "Call {CallId}: could not open {Path} for recording.", callId, location.FullPath);
+            await WaitForHangupAsync(player, telephony.RecordingToneIntervalSeconds, cancellationToken);
+            return;
+        }
+
+        void OnRtpPacket(IPEndPoint remote, SDPMediaTypesEnum mediaType, RTPPacket packet)
+        {
+            if (mediaType != SDPMediaTypesEnum.audio)
+            {
+                return;
+            }
+
+            recorder.Accept(
+                packet.Header.PayloadType,
+                packet.Header.Timestamp,
+                packet.Header.SequenceNumber,
+                packet.Payload);
+        }
+
+        mediaSession.OnRtpPacketReceived += OnRtpPacket;
+        _logger.LogInformation("Call {CallId}: recording to {Path}", callId, location.RelativePath);
+
+        try
+        {
+            await WaitForHangupAsync(player, telephony.RecordingToneIntervalSeconds, cancellationToken);
+        }
+        finally
+        {
+            mediaSession.OnRtpPacketReceived -= OnRtpPacket;
+
+            var outcome = recorder.Close();
+            _logger.LogInformation(
+                "Call {CallId}: recorded {Duration:0.0}s ({Size:N0} bytes) to {Path}; {Silence:0.0}s filled for lost "
+                + "packets, {Late} late, {Discontinuities} discontinuities",
+                callId,
+                outcome.DurationSeconds,
+                outcome.SizeBytes,
+                location.RelativePath,
+                outcome.SilenceSeconds,
+                outcome.LateFrames,
+                outcome.Discontinuities);
+
+            try
+            {
+                // Touches only the Recording row - the aggregate's own columns are unchanged, so EF emits
+                // no UPDATE for the Call and this cannot race the hangup handler's EndCall into
+                // overwriting the terminal status with a stale one.
+                await calls.ExecuteAsync(
+                    new FinalizeRecording(callId, DateTimeOffset.UtcNow, outcome.DurationSeconds, outcome.SizeBytes));
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Call {CallId}: recording finished but could not be finalized in the database.", callId);
+            }
+        }
+    }
+
+    /// <summary>Runs the PIN gate, ending the call itself when the caller fails it.</summary>
+    private async Task<bool> PassesPinAsync(
+        Guid callId,
+        SIPUserAgent userAgent,
+        PromptPlayer player,
+        TelephonyOptions telephony,
+        Func<CallCommand, string, Task> endOnceAsync,
+        CancellationToken cancellationToken)
+    {
+        var gate = new PinGate(
+            userAgent,
+            player,
+            telephony.OutboundPin,
+            TimeSpan.FromSeconds(telephony.ScreeningTimeoutSeconds),
+            _logger);
+
+        var outcome = await gate.RunAsync(callId, cancellationToken);
+        if (outcome == PinOutcome.Accepted)
+        {
+            await calls.ExecuteAsync(new PassScreening(callId, DateTimeOffset.UtcNow));
+            return true;
+        }
+
+        var (screening, reason) = outcome == PinOutcome.TimedOut
+            ? (ScreeningOutcome.TimedOut, $"no PIN within {telephony.ScreeningTimeoutSeconds}s")
+            : (ScreeningOutcome.WrongDigit, "wrong PIN");
+
+        await endOnceAsync(new RecordScreeningOutcome(callId, screening, DateTimeOffset.UtcNow, reason), reason);
+        return false;
+    }
+
+    /// <summary>
+    /// Blocks until the caller hangs up (or the host stops), sounding the recording tone on its interval
+    /// if one is configured. The tone is sent, not received, so it never appears in the recording.
+    /// </summary>
+    private static async Task WaitForHangupAsync(PromptPlayer player, int toneIntervalSeconds, CancellationToken cancellationToken)
+    {
+        try
+        {
+            if (toneIntervalSeconds <= 0)
+            {
+                await Task.Delay(Timeout.Infinite, cancellationToken);
+                return;
+            }
+
+            var interval = TimeSpan.FromSeconds(toneIntervalSeconds);
+            while (!cancellationToken.IsCancellationRequested)
+            {
+                await Task.Delay(interval, cancellationToken);
+                await player.PlayAsync(PromptNames.RecordingTone, interrupt: null, cancellationToken);
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            // The caller hung up, or the host is shutting down. Both are the normal way out.
+        }
+    }
+
     /// <summary>Runs the press-1 spam gate and records its outcome.</summary>
     private async Task ScreenAsync(
         Guid callId,
         SIPUserAgent userAgent,
-        AudioExtrasSource audioSource,
+        PromptPlayer player,
         Func<CallCommand, string, Task> endOnceAsync,
         CancellationToken cancellationToken)
     {
@@ -514,8 +688,7 @@ public class TelephonyBackgroundService(
 
         var gate = new ScreeningGate(
             userAgent,
-            audioSource,
-            prompts,
+            player,
             telephony.ScreeningDigit,
             TimeSpan.FromSeconds(telephony.ScreeningTimeoutSeconds),
             _logger);
