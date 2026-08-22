@@ -31,10 +31,34 @@ bring-up fault (`403 Caller Origination Number is Invalid`) worth knowing about 
 `BridgeToMobileAsync` again.
 
 **Consent disclosure: decided.** The spoken notice on each path (`greeting.wav` Inbound,
-`recording-notice.wav` Outbound) is the operator's chosen disclosure, confirmed audible on real calls; the
-periodic recording tone (`Telephony:RecordingToneIntervalSeconds`) stays off. See the consent note below —
-the structural gap it describes (the Outbound path's merged-in party never hears anything) is unchanged by
-that decision, it is a property of the design.
+`recording-reminder.wav` Outbound, to the operator) is the operator's chosen disclosure, confirmed audible
+on real calls; the periodic recording tone (`Telephony:RecordingToneIntervalSeconds`) stays off. See the
+consent note below — the structural gap it describes (the party added via the handset's native merge never
+hears anything) is unchanged by that decision, it is a property of the design. Note `recording-notice.wav`
+is a *different* prompt now — see the addendum below.
+
+**Phase 4 addendum — Outbound proxy dial: done, per the operator, with a known open audio-quality issue.**
+While on an Outbound-source call, dialing `*{NUMBER}#` places a second leg from `Telephony:DidNumber` to
+whatever number was entered — a self-hosted outbound calling proxy, so the far end sees the DID rather
+than the operator's real mobile. Reuses Phase 4's dial primitive (now extracted as `PlaceOutboundLegAsync`,
+shared by `BridgeToMobileAsync`) and mixes the proxy party's audio live into the *same* mono `CallRecorder`
+already running for the call, rather than starting a second `Recording` — see PROGRESS.md for why (the
+domain only supports one `Recording` per `Call`) and for the `CallRecorder`/`RtpLegAccumulator` design that
+makes that work. `recording-notice.wav` ("This call is being recorded") plays to the proxy-dialed party on
+connect - it is the one leg on this path CallTree can disclose to directly, unlike a native-merged party.
+
+Real testing confirmed connect/notice/recording all work and, after the `PacedRtpRelay` fix (see Gotchas
+below), the operator directed marking both this addendum and Phase 4 **done**. **But do not treat the audio
+path as fully solved** — re-testing after that fix still found some chop/lag on both bridging paths, worst
+on the Inbound bridge's caller→`MyCellNumber` direction. Diagnosis was explicitly deferred, not chased
+further. **PROGRESS.md has a dedicated "⚠️ KNOWN ISSUE" section with what's already ruled out and specific
+hypotheses to start from (jitter-buffer depth, clock drift over a long call, one leg's network path being
+inherently jitterier than the other) — read it before touching the relay code again.**
+
+**This also raises the stakes on `Telephony:OutboundPin`**: unlike the Inbound
+bridge, which only ever dials the fixed `MyCellNumber`, the proxy dial places a call to whatever number
+the caller enters — a spoofed caller ID
+that gets past a missing PIN is an open outbound dialer at the trunk's expense, not just a junk recording.
 
 A recordings browser (`/recordings`, `/recordings/{id}` with playback) is built on top of Phase 7's REST
 API and already ships in the frontend.
@@ -154,6 +178,25 @@ stage and copies them into the API's `wwwroot`. One container, one port, one ori
   (see `TelephonyBackgroundService.BridgeToMobileAsync`) for any outbound leg. This one was found by
   reflecting the installed package's actual field list rather than trusting the XML docs' summaries -
   another instance of "reading the source beats guessing" above.
+- **A live RTP relay needs its own *paced* output, not just a jitter buffer.** Relaying a packet the
+  instant `OnRtpPacketReceived` fires (straight into `SendRtpRaw`) is choppy, found on a real bridged/proxy
+  call where the *recording* sounded fine but the *live* call wasn't — the recording path already reorders
+  through `RtpJitterBuffer` (via `RtpLegAccumulator`), and the first cut of the relay didn't. A recording
+  sounding right is not proof the live audio does; test both. **Reordering alone is not enough either** —
+  a first fix that added a per-direction `RtpJitterBuffer` before relaying still left the call choppy, now
+  with lag that grew over the call: a burst of packets arriving close together was still relayed as a
+  burst with no pacing between sends, and the far end's own adaptive jitter buffer responds to that by
+  growing its buffering target (matches SIPSorcery issue #1474, unresolved upstream). The actual fix is
+  `PacedRtpRelay` (`CallTree.Telephony/Audio/PacedRtpRelay.cs`): buffer for reordering same as before, but
+  release **at most one frame per fixed 20ms tick** via a `PeriodicTimer`, decoupled from arrival timing
+  entirely. Both `RunBridgeAsync` and `RunProxyDialAsync` use it — reuse it for any future relay rather
+  than wiring `SendRtpRaw` up to `OnRtpPacketReceived` directly, and don't stop at "reordered" when
+  diagnosing relay choppiness — pacing is the part that actually matters. **Still not the end of it,
+  though**: re-testing after this fix still found some chop/lag on both bridging paths (worst on the
+  Inbound bridge's caller→`MyCellNumber` direction) — deferred, open, see PROGRESS.md's "⚠️ KNOWN ISSUE"
+  section for what's already ruled out and where to start (buffer depth, long-call clock drift with no
+  resync, one leg's network path plausibly being inherently jitterier than the other). Don't assume
+  `PacedRtpRelay` is the final word on this.
 - **NAT: `Telephony:PublicHost` is mandatory when running behind a router.** SIPSorcery substitutes the
   *local* address into the REGISTER `Contact` (see `SIPTransport.ContactHost`), so without it the trunk is
   told to reach us at a LAN address and inbound INVITEs never arrive — the caller hears a busy/failure tone
@@ -272,12 +315,15 @@ stage and copies them into the API's `wwwroot`. One container, one port, one ori
   than one. The disclosure approach was an open decision for the operator; it is now decided (spoken
   notice on each path, tone off — see Status) but the rule stands regardless of what gets decided: never
   silently drop or "simplify away" disclosure prompts or tones once they exist, and never assume one
-  jurisdiction's rules apply universally. Specific to the Outbound path: `recording-notice.wav` reaches
-  **only the operator**. The third party is merged in by the handset and CallTree is never told, so no
-  prompt can ever reach them — `Telephony:RecordingToneIntervalSeconds` is the only disclosure available
-  to that party, and it has been left off by operator decision, not just its default. Say so plainly
-  whenever this path is discussed; it is a property of the design, not a bug to be quietly fixed, and an
-  operator who assumes the notice is heard by everyone is exposed.
+  jurisdiction's rules apply universally. Specific to the Outbound path: `recording-reminder.wav` reaches
+  **only the operator**. A party added via the handset's *native* three-way merge is invisible to
+  CallTree, so no prompt can ever reach them — `Telephony:RecordingToneIntervalSeconds` is the only
+  disclosure available to that party, and it has been left off by operator decision, not just its default.
+  Say so plainly whenever this path is discussed; it is a property of the design, not a bug to be quietly
+  fixed, and an operator who assumes the reminder is heard by everyone is exposed. This gap does **not**
+  apply to a party reached through the outbound proxy dial (`*{NUMBER}#`) — CallTree placed that leg
+  itself, so `recording-notice.wav` genuinely reaches them; don't conflate the two prompts or the two gaps
+  when this is discussed.
 
 ## Testing philosophy
 

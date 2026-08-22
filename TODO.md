@@ -12,14 +12,16 @@ real to render.
 
 - [x] Choose and add a **licence** — MIT, in [LICENSE.md](LICENSE.md).
 - [x] Decide the **consent disclosure approach**. Operator decision: the spoken notice on each path
-      (`greeting.wav` for Inbound, `recording-notice.wav` for Outbound) is sufficient — confirmed audible
+      (`greeting.wav` for Inbound, `recording-reminder.wav` for Outbound) is sufficient — confirmed audible
       on real calls — and the periodic **recording tone stays off** (`Telephony:RecordingToneIntervalSeconds`
       remains `0`, not just its default). The structural gap is unchanged and still applies: on the
-      Outbound path this notice reaches only the operator, never the party merged in later by the
-      handset — see [Recording consent](README.md#recording-consent--read-this).
-- [ ] Replace the synthesised placeholder prompts with real recordings. Six now, not three —
-      `recording-notice` and `pin-request` were added in Phase 3, and `recording-tone` is a generated
-      1400 Hz tone rather than speech. Wording itself is unchanged by the decision above; regenerate with
+      Outbound path this reminder reaches only the operator, never a party added later via the handset's
+      *native* merge — see [Recording consent](README.md#recording-consent--read-this). (A party reached
+      through the later-added outbound proxy dial, `*{NUMBER}#`, is a separate case: CallTree placed that
+      leg itself and does disclose to them directly, via a differently-worded `recording-notice.wav`.)
+- [ ] Replace the synthesised placeholder prompts with real recordings. Now eight, not three —
+      `recording-reminder`, `recording-notice`, `pin-request`, `apology` and `ringing` were added across
+      later phases, and `recording-tone` is a generated tone rather than speech. Regenerate with
       `tools/generate-prompts.ps1` if it ever needs to change.
 
 ## Security — before real inbound traffic is bridged out to the trunk
@@ -62,7 +64,7 @@ back correctly.
 - [x] **Validate by phone**: call the DID from the mobile, confirm the notice plays, hang up, and check
       the WAV plays back at the right length with both sides audible after a three-way merge.
 - [x] The consent disclosure decision — see Immediate. Decided: the spoken notice
-      (`recording-notice.wav`) is sufficient; the periodic tone via `Telephony:RecordingToneIntervalSeconds`
+      (`recording-reminder.wav`) is sufficient; the periodic tone via `Telephony:RecordingToneIntervalSeconds`
       stays off.
 
 ## Phase 4 — Inbound bridge ✅ (validated by phone)
@@ -70,7 +72,9 @@ back correctly.
 Confirmed against real calls: the bridge connects with two-way audio, a caller hangup ends the mobile leg,
 a mobile hangup ends the caller leg, and an unanswered ring lands in `Missed` with the apology prompt
 heard. See PROGRESS.md for what shipped and what was deliberately left out of this pass (no
-`CallSession`/`ActiveCallRegistry` refactor, no DTMF passthrough) and remains open below.
+`CallSession`/`ActiveCallRegistry` refactor, no DTMF passthrough) and remains open below. **See also the
+known residual audio-choppiness/lag issue documented under the Phase 4 addendum below** — it affects this
+bridge too (the caller→`MyCellNumber` direction specifically flagged as worst), deferred, not yet diagnosed.
 
 - [x] On a successful gate: place an outbound leg to the configured mobile (second `SIPUserAgent`) and
       bridge RTP both directions (payload relay; no transcode while both legs are PCMU).
@@ -90,6 +94,51 @@ heard. See PROGRESS.md for what shipped and what was deliberately left out of th
       not worsened by the bridge, which uses its own separate per-call agent for the outbound leg.
 - [ ] Re-check the trunk account's concurrency and per-call duration caps. A 10-minute ceiling would
       truncate recordings; some providers apply one on lower tiers.
+
+### Phase 4 addendum — Outbound proxy dial ✅ (validated by phone; known residual audio-quality issue, see below)
+
+A self-hosted outbound calling proxy on the Outbound-source path: while on a call from `MyCellNumber`,
+dialing `*{NUMBER}#` places a *new* leg from the DID to `{NUMBER}`, so the far end sees the DID rather than
+the operator's real mobile number. Reuses Phase 4's dial/ringback primitives (see PROGRESS.md for the
+`PlaceOutboundLegAsync` extraction) and mixes the proxy party's audio live into the same continuous mono
+recording rather than starting a second one — see PROGRESS.md for why that was the harder half of this.
+
+- [x] `*{NUMBER}#` DTMF collection (`ProxyDialCollector`), persistent for the call's whole duration rather
+      than one-shot like `ScreeningGate`/`PinGate` — a bad entry resets to idle instead of ending the call.
+- [x] Reused ring-back (`ringing.wav`) plays to the operator while the proxy leg dials.
+- [x] New `recording-notice.wav` ("This call is being recorded") plays to the proxy-dialed party on
+      connect — the one leg on this path CallTree can actually disclose to directly. The prompt previously
+      at that name (played to the operator) is renamed `recording-reminder.wav`, same wording.
+- [x] `CallRecorder` gained an attachable/detachable secondary leg, summed (clamped) into the same mono
+      file live rather than starting a new `Recording` — the operator can dial `*{NUMBER}#` more than once
+      in the same call.
+- [x] `PlaceOutboundLegAsync` extracted from `BridgeToMobileAsync` as a shared, trigger-agnostic dial
+      primitive — written for the future Web-softphone phase to call the same way.
+- [x] **Validate by phone**: confirmed working — ring-back, the notice playing to the answering party, both
+      sides audible, both present in the recording.
+- [x] Relay audio quality: a first fix (reorder before relaying) turned out insufficient — real testing
+      still found the live call choppy, with lag that grew as the call went on. Root cause was pacing, not
+      ordering: bursty arrival was still relayed as a burst, and the far end's own adaptive jitter buffer
+      grows its buffering target in response. Fixed with `PacedRtpRelay` (fixed 20ms send cadence via a
+      `PeriodicTimer`, decoupled from arrival timing) — see PROGRESS.md's bring-up fault. Also applies to
+      Phase 4's inbound bridge, sharing the same relay code.
+- [x] **Re-validated by phone** (2026-08-22): the operator confirmed Phase 4 and this addendum are both
+      working and directed calling them done, despite the known residual audio-quality issue below — that
+      issue is tracked separately rather than blocking completion.
+- [ ] No audible feedback on an unanswered proxy dial beyond a log line — see PROGRESS.md's scope note.
+      A purpose-built prompt is a reasonable small follow-up, not required for this to be considered done.
+
+#### ⚠️ KNOWN ISSUE (open, deferred): residual audio choppiness/lag survives `PacedRtpRelay`
+
+**Not fixed. Explicitly deferred by the operator on 2026-08-22 — diagnose in a dedicated future session,
+do not assume closed.** `PacedRtpRelay` (fixed 20ms send cadence) measurably helped but did not eliminate
+the problem: real calls still show some chop/lag, on **both** the Inbound bridge and the Outbound proxy
+dial, and the operator specifically flagged the **caller→`MyCellNumber` direction of the Inbound bridge as
+the worst** of the affected legs. See PROGRESS.md for the full write-up and diagnostic hypotheses to start
+from (buffer depth too shallow for real network jitter, long-call clock-drift between our `PeriodicTimer`
+and the sender's RTP clock with no resync mechanism, and the possibility that the two relay directions
+are not actually symmetric in practice even though the code is). Read PROGRESS.md's "Known issue" section
+in full before touching `PacedRtpRelay`/`RunBridgeAsync`/`RunProxyDialAsync` again.
 
 ## Phase 5 — Bridged-call recording ✅ (the slice built alongside Phase 4, validated by phone)
 

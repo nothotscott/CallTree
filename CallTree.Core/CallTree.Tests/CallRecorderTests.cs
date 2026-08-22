@@ -32,10 +32,10 @@ public class CallRecorderTests : IDisposable
         new(Guid.NewGuid(), PathFor(name), Depth, NullLogger.Instance);
 
     /// <summary>A frame of constant tone, so silence and audio can be told apart in the output.</summary>
-    private static byte[] Tone() => [.. Enumerable.Repeat((byte)0x10, FrameSamples)];
+    private static byte[] Tone(byte level = 0x10) => [.. Enumerable.Repeat(level, FrameSamples)];
 
     /// <summary>Feeds <paramref name="count"/> consecutive 20 ms frames starting at a timestamp.</summary>
-    private static void Feed(CallRecorder recorder, uint firstTimestamp, ushort firstSequence, int count)
+    private static void Feed(CallRecorder recorder, uint firstTimestamp, ushort firstSequence, int count, byte level = 0x10)
     {
         for (var i = 0; i < count; i++)
         {
@@ -43,11 +43,31 @@ public class CallRecorderTests : IDisposable
                 G711.PcmuPayloadType,
                 unchecked(firstTimestamp + (uint)(i * FrameSamples)),
                 (ushort)(firstSequence + i),
-                Tone());
+                Tone(level));
+        }
+    }
+
+    /// <summary>Feeds the attached secondary leg, mirroring <see cref="Feed"/> for the primary.</summary>
+    private static void FeedSecondary(CallRecorder recorder, uint firstTimestamp, ushort firstSequence, int count, byte level = 0x50)
+    {
+        for (var i = 0; i < count; i++)
+        {
+            recorder.AcceptSecondary(
+                G711.PcmuPayloadType,
+                unchecked(firstTimestamp + (uint)(i * FrameSamples)),
+                (ushort)(firstSequence + i),
+                Tone(level));
         }
     }
 
     private static PcmAudio Read(string path) => WavAudio.ReadPcm(File.ReadAllBytes(path));
+
+    private static short[] ToShorts(byte[] bytes)
+    {
+        var shorts = new short[bytes.Length / 2];
+        Buffer.BlockCopy(bytes, 0, shorts, 0, bytes.Length);
+        return shorts;
+    }
 
     [Fact]
     public void Writes_an_eight_kilohertz_mono_wav_that_reads_back()
@@ -209,6 +229,97 @@ public class CallRecorderTests : IDisposable
 
         Assert.Equal(outcome, recorder.Close());
         Assert.Equal(0.2, Read(PathFor("after-close.wav")).Duration.TotalSeconds, precision: 3);
+    }
+
+    [Fact]
+    public void A_secondary_leg_attached_from_the_start_sums_both_into_one_mono_stream()
+    {
+        // Attaching before any primary audio arrives avoids any ordering ambiguity from the jitter
+        // buffer's own reordering window - both legs start clean and in lockstep.
+        var recorder = NewRecorder("mixed-from-start.wav");
+        recorder.AttachSecondaryLeg();
+
+        Feed(recorder, 0, 0, 20, level: 0x10); // 400ms
+        FeedSecondary(recorder, 0, 100, 20, level: 0x50); // 400ms, same span
+
+        var outcome = recorder.Close();
+
+        Assert.Equal(0.4, outcome.DurationSeconds, precision: 3);
+
+        var expected = (short)Math.Clamp(G711.Decode(0x10) + G711.Decode(0x50), short.MinValue, short.MaxValue);
+        Assert.All(ToShorts(Read(PathFor("mixed-from-start.wav")).Samples), s => Assert.Equal(expected, s));
+    }
+
+    [Fact]
+    public void AcceptSecondary_before_any_attach_is_ignored()
+    {
+        var recorder = NewRecorder("no-attach.wav");
+
+        Feed(recorder, 0, 0, 10);
+        FeedSecondary(recorder, 0, 100, 10); // nothing attached - must be a no-op, not a crash
+
+        var outcome = recorder.Close();
+
+        // Behaves exactly like a plain single-leg recording: the stray secondary packets left no trace.
+        Assert.Equal(0.2, outcome.DurationSeconds, precision: 3);
+        var expected = G711.Decode(0x10);
+        Assert.All(ToShorts(Read(PathFor("no-attach.wav")).Samples), s => Assert.Equal(expected, s));
+    }
+
+    /// <summary>Feeds both legs in lockstep, one frame each per iteration - mirrors two concurrent real-time RTP streams.</summary>
+    private static void FeedBoth(
+        CallRecorder recorder, uint primaryTimestamp, ushort primarySequence, uint secondaryTimestamp, ushort secondarySequence, int count)
+    {
+        for (var i = 0; i < count; i++)
+        {
+            recorder.Accept(
+                G711.PcmuPayloadType, unchecked(primaryTimestamp + (uint)(i * FrameSamples)), (ushort)(primarySequence + i), Tone());
+            recorder.AcceptSecondary(
+                G711.PcmuPayloadType, unchecked(secondaryTimestamp + (uint)(i * FrameSamples)), (ushort)(secondarySequence + i), Tone(0x50));
+        }
+    }
+
+    [Fact]
+    public void Detaching_stops_mixing_and_the_file_reverts_to_primary_only()
+    {
+        var recorder = NewRecorder("detach.wav");
+
+        recorder.AttachSecondaryLeg();
+        FeedBoth(recorder, primaryTimestamp: 0, primarySequence: 0, secondaryTimestamp: 0, secondarySequence: 100, count: 10); // 200ms mixed
+        recorder.DetachSecondaryLeg();
+
+        Feed(recorder, 1600, 10, 10); // 200ms primary-only afterwards
+
+        var outcome = recorder.Close();
+
+        // 200ms mixed + 200ms primary-only = 400ms of primary audio, plus at most one jitter-buffer
+        // depth's worth (60ms configured here) of secondary tail that had no primary counterpart yet at
+        // the exact moment of detach - the same bounded reconciliation BridgedCallRecorder documents for
+        // its own leg-length mismatch at Close(). Nothing is ever lost; this just isn't exactly 400ms.
+        Assert.InRange(outcome.DurationSeconds, 0.4, 0.4 + Depth.TotalSeconds);
+    }
+
+    [Fact]
+    public void A_second_attach_after_detach_mixes_again()
+    {
+        // Simulates the operator dialing *{NUMBER}# twice in the same call.
+        var recorder = NewRecorder("reattach.wav");
+
+        recorder.AttachSecondaryLeg();
+        FeedBoth(recorder, primaryTimestamp: 0, primarySequence: 0, secondaryTimestamp: 0, secondarySequence: 100, count: 10);
+        recorder.DetachSecondaryLeg();
+
+        Feed(recorder, 1600, 10, 5); // 100ms primary-only in between the two proxy calls
+
+        recorder.AttachSecondaryLeg();
+        FeedBoth(recorder, primaryTimestamp: 2400, primarySequence: 15, secondaryTimestamp: 0, secondarySequence: 200, count: 10);
+        recorder.DetachSecondaryLeg();
+
+        var outcome = recorder.Close();
+
+        // 200ms mixed + 100ms alone + 200ms mixed again = 500ms of primary audio, plus up to two
+        // detaches' worth of bounded secondary-tail reconciliation (see the test above).
+        Assert.InRange(outcome.DurationSeconds, 0.5, 0.5 + (2 * Depth.TotalSeconds));
     }
 
     /// <summary>Reads a file the recorder still holds open for writing.</summary>

@@ -30,11 +30,14 @@ $prompts = [ordered]@{
     greeting          = "Thank you for calling. This call will be recorded. To be connected, press 1."
     accepted          = "Thank you. Connecting you now."
     rejected          = "No selection was received. Goodbye."
-    # Heard only by the operator: the party added later joins via the handset's own three-way merge,
-    # which CallTree is never told about. Telling them is the operator's job, hence the reminder.
-    "recording-notice" = "Recording has started. Please tell anyone you add to this call that it is being recorded."
-    "pin-request"      = "Please enter your PIN, followed by the pound key."
-    apology            = "Sorry, we were unable to reach anyone. Goodbye."
+    # Heard only by the operator: a party added via the handset's own three-way merge joins without
+    # CallTree ever being told, so telling them is the operator's own job - hence "reminder", not "notice".
+    "recording-reminder" = "Recording has started. Please tell anyone you add to this call that it is being recorded."
+    # Heard by the party reached through an outbound proxy dial (*NUMBER# on the Outbound-source path).
+    # Unlike the reminder above, CallTree placed this leg itself and can disclose to them directly.
+    "recording-notice"   = "This call is being recorded."
+    "pin-request"        = "Please enter your PIN, followed by the pound key."
+    apology              = "Sorry, we were unable to reach anyone. Goodbye."
 }
 
 # Not speech: a periodic tone is the only disclosure the outbound path can make to a party who is merged

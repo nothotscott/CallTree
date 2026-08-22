@@ -1,4 +1,3 @@
-using System.Buffers;
 using Microsoft.Extensions.Logging;
 using NAudio.Wave;
 
@@ -18,54 +17,56 @@ public readonly record struct RecordingOutcome(
     int Discontinuities);
 
 /// <summary>
-/// Writes one call's received audio to a mono 16-bit WAV.
+/// Writes one Outbound-source call's audio to a mono 16-bit WAV: the primary (operator's own) leg for the
+/// whole call, plus an optional second leg that can be attached and detached any number of times during
+/// the call — the DID-initiated outbound proxy dial (<c>*{NUMBER}#</c>). While attached, both legs are
+/// decoded, reordered and silence-filled independently (see <see cref="RtpLegAccumulator"/>, which also
+/// backs <see cref="BridgedCallRecorder"/>), then summed sample-for-sample into the same continuous mono
+/// stream — clamped rather than wrapped, since two speakers rarely peak at once but occasionally do.
 /// </summary>
 /// <remarks>
 /// <para>
-/// The RTP timestamp drives the file, not a wall clock. For PCMU the timestamp counts samples at 8 kHz,
-/// so it states exactly where each packet belongs; writing packets back-to-back as they arrive would
-/// instead silently compress every pause in the conversation and drift against the sender's clock over a
-/// long call. Working from the timestamp means a gap is measurable, and gaps are filled with real silence
-/// so the recording stays in sync with what was actually said.
+/// Deliberately mono and deliberately one continuous file, matching the native-handset-merge case this
+/// path already handles: the operator's phone carrier mixes a merged-in party's audio before it ever
+/// reaches CallTree, so a single leg already carries both voices there. A DID-initiated proxy leg is
+/// different - it is a second, CallTree-controlled RTP stream, not something the carrier mixes for us -
+/// but the recording this class produces should look the same either way: one file, one channel, for the
+/// whole call, regardless of how many times a proxy leg comes and goes during it.
 /// </para>
 /// <para>
-/// Phase 5's stereo recording cannot reuse this directly: two legs have two unrelated RTP clocks, so
-/// interleaving them needs a shared clock to align against. That is a different problem, deliberately not
-/// solved here.
+/// With no secondary leg attached this behaves exactly as it always has: each packet is decoded and
+/// written as soon as it is reordered into place, so the file is durable on disk immediately rather than
+/// only at the next flush. With one attached, writing waits for a sample from *both* legs before it can
+/// go out - packet arrival on either leg is what drives the shared position, the same principle
+/// <see cref="BridgedCallRecorder"/> uses for its two permanently-separate channels. A leg with nothing
+/// queued is still understood to be advancing in real time, because its own silence-fill keeps it topped
+/// up during a gap on that leg alone.
 /// </para>
 /// <para>
-/// Packets arrive on SIPSorcery's RTP threads while <see cref="Close"/> is called from the call handler,
-/// so everything touching the writer is under one lock. It is uncontended in the normal case: one packet
-/// every 20 ms.
+/// The header is re-patched periodically so a process killed mid-call leaves a file that still plays up to
+/// the last flush instead of one every tool reads as empty.
 /// </para>
 /// </remarks>
 public sealed class CallRecorder : IDisposable
 {
-    /// <summary>
-    /// Gaps longer than this are treated as a discontinuity — a clock reset, a stray packet from an old
-    /// stream, or a re-INVITE — and resynchronised rather than filled. Without the cap a single bogus
-    /// timestamp would ask for gigabytes of silence.
-    /// </summary>
-    private static readonly TimeSpan MaxSilenceFill = TimeSpan.FromSeconds(10);
-
-    /// <summary>How much audio to accumulate between header updates. See <see cref="FlushIfDue"/>.</summary>
     private static readonly TimeSpan FlushInterval = TimeSpan.FromSeconds(5);
 
     private readonly Lock _gate = new();
     private readonly WaveFileWriter _writer;
-    private readonly RtpJitterBuffer _buffer;
     private readonly ILogger _logger;
     private readonly Guid _callId;
-    private readonly uint _maxSilenceSamples;
+    private readonly TimeSpan _jitterDepth;
+    private readonly RtpLegAccumulator _primary;
     private readonly long _flushIntervalSamples;
+    private readonly short[] _sampleBuffer = new short[1];
 
-    private uint _nextTimestamp;
-    private bool _started;
+    private RtpLegAccumulator? _secondary;
+    private long _secondarySilenceSamples;
+    private int _secondaryLateFrames;
+    private int _secondaryDiscontinuities;
+
     private long _samplesWritten;
-    private long _silenceSamples;
     private long _samplesAtLastFlush;
-    private int _lateFrames;
-    private int _discontinuities;
     private bool _closed;
     private bool _faulted;
     private RecordingOutcome _outcome;
@@ -74,9 +75,9 @@ public sealed class CallRecorder : IDisposable
     {
         _callId = callId;
         _logger = logger;
+        _jitterDepth = jitterDepth;
         FullPath = fullPath;
-        _buffer = new RtpJitterBuffer(jitterDepth);
-        _maxSilenceSamples = (uint)(MaxSilenceFill.TotalSeconds * G711.ClockRate);
+        _primary = new RtpLegAccumulator(jitterDepth, "primary");
         _flushIntervalSamples = (long)(FlushInterval.TotalSeconds * G711.ClockRate);
 
         Directory.CreateDirectory(Path.GetDirectoryName(fullPath)!);
@@ -98,13 +99,12 @@ public sealed class CallRecorder : IDisposable
     }
 
     /// <summary>
-    /// Offers one received RTP packet. Anything that is not PCMU is ignored — notably the RFC 4733
-    /// telephone-event payload, which shares the stream and would be written as a burst of noise.
+    /// Offers one received RTP packet from the primary (operator's own) leg. Anything that is not PCMU is
+    /// ignored — notably the RFC 4733 telephone-event payload, which shares the stream and would be
+    /// written as a burst of noise.
     /// </summary>
     public void Accept(int payloadType, uint timestamp, ushort sequenceNumber, byte[]? payload)
     {
-        // Null-tolerant because this runs on SIPSorcery's receive loop: an exception thrown here does not
-        // fail the recording, it stops the call taking delivery of any further RTP.
         if (payloadType != G711.PcmuPayloadType || payload is not { Length: > 0 })
         {
             return;
@@ -117,14 +117,93 @@ public sealed class CallRecorder : IDisposable
                 return;
             }
 
-            _buffer.Add(new RtpAudioFrame(timestamp, sequenceNumber, payload));
+            _primary.Accept(new RtpAudioFrame(timestamp, sequenceNumber, payload), _logger, _callId);
 
-            while (_buffer.TryDequeue(out var frame))
+            try
             {
-                WriteFrame(frame);
+                Drain();
+                FlushIfDue();
+            }
+            catch (Exception ex)
+            {
+                Fault(ex);
+            }
+        }
+    }
+
+    /// <summary>Offers one received RTP packet from the attached secondary (proxy-dialed) leg, if any.</summary>
+    public void AcceptSecondary(int payloadType, uint timestamp, ushort sequenceNumber, byte[]? payload)
+    {
+        if (payloadType != G711.PcmuPayloadType || payload is not { Length: > 0 })
+        {
+            return;
+        }
+
+        lock (_gate)
+        {
+            if (_closed || _faulted || _secondary is null)
+            {
+                return;
             }
 
-            FlushIfDue();
+            _secondary.Accept(new RtpAudioFrame(timestamp, sequenceNumber, payload), _logger, _callId);
+
+            try
+            {
+                Drain();
+                FlushIfDue();
+            }
+            catch (Exception ex)
+            {
+                Fault(ex);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Starts mixing a second leg in - the proxy-dialed party has answered. A fresh
+    /// <see cref="RtpLegAccumulator"/> each time, since every proxy call is an unrelated RTP stream with
+    /// its own clock origin.
+    /// </summary>
+    public void AttachSecondaryLeg()
+    {
+        lock (_gate)
+        {
+            if (_secondary is not null)
+            {
+                _logger.LogWarning("Call {CallId}: a secondary leg is already attached; ignoring.", _callId);
+                return;
+            }
+
+            _secondary = new RtpLegAccumulator(_jitterDepth, "proxy");
+        }
+    }
+
+    /// <summary>
+    /// Stops mixing the second leg - the proxy-dialed party hung up. Drains whatever it was still holding
+    /// (summed with the primary where one is available, alone otherwise) before dropping it, so its tail
+    /// isn't lost; any primary backlog left over stays queued and drains normally now that mixing has
+    /// stopped. Safe to call again later if the operator places another proxy dial in the same call.
+    /// </summary>
+    public void DetachSecondaryLeg()
+    {
+        lock (_gate)
+        {
+            if (_secondary is null)
+            {
+                return;
+            }
+
+            try
+            {
+                DrainSecondaryTail();
+            }
+            catch (Exception ex)
+            {
+                Fault(ex);
+            }
+
+            _secondary = null;
         }
     }
 
@@ -145,9 +224,19 @@ public sealed class CallRecorder : IDisposable
 
             if (!_faulted)
             {
-                while (_buffer.TryFlush(out var frame))
+                try
                 {
-                    WriteFrame(frame);
+                    _primary.Flush(_logger, _callId);
+                    DrainSecondaryTail();
+
+                    while (_primary.Pending.Count > 0)
+                    {
+                        WriteSample(_primary.Pending.Dequeue());
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Fault(ex);
                 }
             }
 
@@ -174,9 +263,9 @@ public sealed class CallRecorder : IDisposable
             _outcome = new RecordingOutcome(
                 DurationSeconds: Math.Round(_samplesWritten / (double)G711.ClockRate, 3),
                 SizeBytes: sizeBytes,
-                SilenceSeconds: Math.Round(_silenceSamples / (double)G711.ClockRate, 3),
-                LateFrames: _lateFrames,
-                Discontinuities: _discontinuities);
+                SilenceSeconds: Math.Round((_primary.SilenceSamples + _secondarySilenceSamples) / (double)G711.ClockRate, 3),
+                LateFrames: _primary.LateFrames + _secondaryLateFrames,
+                Discontinuities: _primary.Discontinuities + _secondaryDiscontinuities);
 
             return _outcome;
         }
@@ -184,94 +273,70 @@ public sealed class CallRecorder : IDisposable
 
     public void Dispose() => Close();
 
-    private void WriteFrame(RtpAudioFrame frame)
+    /// <summary>
+    /// With no secondary attached, drains the primary alone as soon as it arrives - unchanged from before
+    /// this class could mix a second leg in. With one attached, only writes once both legs have a sample
+    /// for this position, so packet arrival on either leg is what advances the file.
+    /// </summary>
+    private void Drain()
     {
-        var samples = frame.Payload.Length;
-
-        if (!_started)
+        if (_secondary is null)
         {
-            _started = true;
-            _nextTimestamp = frame.Timestamp;
-        }
-
-        var offset = unchecked((int)(frame.Timestamp - _nextTimestamp));
-
-        if (offset < 0)
-        {
-            // Its place in the file has already been written past, and a WAV cannot be inserted into.
-            // Dropping it loses 20 ms; rewinding would corrupt everything after it.
-            _lateFrames++;
+            while (_primary.Pending.Count > 0)
+            {
+                WriteSample(_primary.Pending.Dequeue());
+            }
             return;
         }
 
-        if (offset > 0)
+        while (_primary.Pending.Count > 0 && _secondary.Pending.Count > 0)
         {
-            if (offset > _maxSilenceSamples)
-            {
-                _discontinuities++;
-                _logger.LogWarning(
-                    "Call {CallId}: RTP timestamp jumped {Seconds:0.#}s (seq {Sequence}) - resynchronising rather than "
-                    + "filling silence. The recording will be shorter than the call by that much.",
-                    _callId,
-                    offset / (double)G711.ClockRate,
-                    frame.SequenceNumber);
-            }
-            else
-            {
-                WriteSilence(offset);
-            }
+            WriteMixedSample();
         }
-
-        var pcmBytes = samples * G711.BytesPerSample;
-        var pcm = ArrayPool<byte>.Shared.Rent(pcmBytes);
-        try
-        {
-            G711.Decode(frame.Payload, pcm.AsSpan(0, pcmBytes));
-            _writer.Write(pcm, 0, pcmBytes);
-            _samplesWritten += samples;
-        }
-        catch (Exception ex)
-        {
-            Fault(ex);
-            return;
-        }
-        finally
-        {
-            ArrayPool<byte>.Shared.Return(pcm);
-        }
-
-        _nextTimestamp = unchecked(frame.Timestamp + (uint)samples);
     }
 
-    private void WriteSilence(int samples)
+    /// <summary>
+    /// Flushes the secondary's jitter buffer, pairs off whatever it can against the primary, then writes
+    /// any secondary tail alone (there is no primary sample left to pair it with, but the audio itself
+    /// must not be dropped). Folds the secondary's diagnostics into the running totals first, since it is
+    /// about to be replaced or cleared. A no-op if nothing is attached.
+    /// </summary>
+    private void DrainSecondaryTail()
     {
-        const int ChunkSamples = G711.ClockRate; // one second at a time
-
-        var chunk = ArrayPool<byte>.Shared.Rent(ChunkSamples * G711.BytesPerSample);
-        try
+        if (_secondary is null)
         {
-            // Rented arrays come back dirty, and "silence" written from stale audio is worse than noise.
-            Array.Clear(chunk);
+            return;
+        }
 
-            var remaining = samples;
-            while (remaining > 0)
-            {
-                var take = Math.Min(remaining, ChunkSamples);
-                _writer.Write(chunk, 0, take * G711.BytesPerSample);
-                remaining -= take;
-            }
+        _secondary.Flush(_logger, _callId);
 
-            _samplesWritten += samples;
-            _silenceSamples += samples;
-        }
-        catch (Exception ex)
+        while (_primary.Pending.Count > 0 && _secondary.Pending.Count > 0)
         {
-            Fault(ex);
+            WriteMixedSample();
         }
-        finally
+
+        while (_secondary.Pending.Count > 0)
         {
-            ArrayPool<byte>.Shared.Return(chunk);
+            WriteSample(_secondary.Pending.Dequeue());
         }
+
+        _secondarySilenceSamples += _secondary.SilenceSamples;
+        _secondaryLateFrames += _secondary.LateFrames;
+        _secondaryDiscontinuities += _secondary.Discontinuities;
+    }
+
+    private void WriteMixedSample()
+    {
+        var primary = _primary.Pending.Dequeue();
+        var secondary = _secondary!.Pending.Dequeue();
+        WriteSample((short)Math.Clamp(primary + secondary, short.MinValue, short.MaxValue));
+    }
+
+    private void WriteSample(short value)
+    {
+        _sampleBuffer[0] = value;
+        _writer.WriteSamples(_sampleBuffer, 0, 1);
+        _samplesWritten++;
     }
 
     /// <summary>

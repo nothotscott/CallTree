@@ -19,15 +19,14 @@ public enum RecordingChannel
 /// </summary>
 /// <remarks>
 /// <para>
-/// <see cref="CallRecorder"/> cannot be reused here: its file position is driven by one leg's own RTP
-/// timestamp, and a bridge has two legs with two unrelated RTP clocks - there is nothing to align them to.
-/// This class gives each leg its own <see cref="RtpJitterBuffer"/> and silence-fill (identical rules to
-/// <see cref="CallRecorder"/>: a gap is filled, a jump over <see cref="MaxSilenceFill"/> is a
-/// discontinuity and is resynchronised instead), but instead of writing straight to the WAV, each leg
-/// accumulates decoded samples into its own queue. The shared wall clock is wherever packet arrival on
-/// *either* leg drives a drain of both queues together - not either leg's RTP clock directly. A leg with
-/// nothing queued is understood to still be advancing in real time, because its own silence-fill keeps its
-/// queue topped up during a gap on that leg alone.
+/// <see cref="CallRecorder"/>'s primary leg cannot drive this by itself: its file position is driven by
+/// one leg's own RTP timestamp, and a bridge has two legs with two unrelated RTP clocks - there is nothing
+/// to align them to. This class gives each leg its own <see cref="RtpLegAccumulator"/> (reordering and
+/// silence-fill: a gap is filled, a jump over ten seconds is a discontinuity and is resynchronised
+/// instead), each accumulating decoded samples into its own queue rather than writing straight to the WAV.
+/// The shared wall clock is wherever packet arrival on *either* leg drives a drain of both queues together
+/// - not either leg's RTP clock directly. A leg with nothing queued is understood to still be advancing in
+/// real time, because its own silence-fill keeps its queue topped up during a gap on that leg alone.
 /// </para>
 /// <para>
 /// Like <see cref="CallRecorder"/>, the header is re-patched periodically so a process killed mid-call
@@ -36,15 +35,14 @@ public enum RecordingChannel
 /// </remarks>
 public sealed class BridgedCallRecorder : IDisposable
 {
-    private static readonly TimeSpan MaxSilenceFill = TimeSpan.FromSeconds(10);
     private static readonly TimeSpan FlushInterval = TimeSpan.FromSeconds(5);
 
     private readonly Lock _gate = new();
     private readonly WaveFileWriter _writer;
     private readonly ILogger _logger;
     private readonly Guid _callId;
-    private readonly LegTrack _caller;
-    private readonly LegTrack _mobile;
+    private readonly RtpLegAccumulator _caller;
+    private readonly RtpLegAccumulator _mobile;
     private readonly long _flushIntervalSamples;
     private readonly short[] _frameBuffer = new short[2];
 
@@ -59,8 +57,8 @@ public sealed class BridgedCallRecorder : IDisposable
         _callId = callId;
         _logger = logger;
         FullPath = fullPath;
-        _caller = new LegTrack(jitterDepth, "caller");
-        _mobile = new LegTrack(jitterDepth, "mobile");
+        _caller = new RtpLegAccumulator(jitterDepth, "caller");
+        _mobile = new RtpLegAccumulator(jitterDepth, "mobile");
         _flushIntervalSamples = (long)(FlushInterval.TotalSeconds * G711.ClockRate);
 
         Directory.CreateDirectory(Path.GetDirectoryName(fullPath)!);
@@ -223,88 +221,5 @@ public sealed class BridgedCallRecorder : IDisposable
             _callId,
             FullPath,
             _samplesWritten / (double)G711.ClockRate);
-    }
-
-    /// <summary>
-    /// One leg's reordering, gap-fill and discontinuity handling - the same rules as
-    /// <see cref="CallRecorder"/>, but accumulating into a queue instead of writing directly.
-    /// </summary>
-    private sealed class LegTrack(TimeSpan jitterDepth, string name)
-    {
-        private readonly RtpJitterBuffer _buffer = new(jitterDepth);
-        private readonly uint _maxSilenceSamples = (uint)(MaxSilenceFill.TotalSeconds * G711.ClockRate);
-
-        private uint _nextTimestamp;
-        private bool _started;
-
-        public Queue<short> Pending { get; } = new();
-        public long SilenceSamples { get; private set; }
-        public int LateFrames { get; private set; }
-        public int Discontinuities { get; private set; }
-
-        public void Accept(RtpAudioFrame frame, ILogger logger, Guid callId)
-        {
-            _buffer.Add(frame);
-            while (_buffer.TryDequeue(out var ready))
-            {
-                Enqueue(ready, logger, callId);
-            }
-        }
-
-        public void Flush(ILogger logger, Guid callId)
-        {
-            while (_buffer.TryFlush(out var ready))
-            {
-                Enqueue(ready, logger, callId);
-            }
-        }
-
-        private void Enqueue(RtpAudioFrame frame, ILogger logger, Guid callId)
-        {
-            if (!_started)
-            {
-                _started = true;
-                _nextTimestamp = frame.Timestamp;
-            }
-
-            var offset = unchecked((int)(frame.Timestamp - _nextTimestamp));
-
-            if (offset < 0)
-            {
-                LateFrames++;
-                return;
-            }
-
-            if (offset > 0)
-            {
-                if (offset > _maxSilenceSamples)
-                {
-                    Discontinuities++;
-                    logger.LogWarning(
-                        "Call {CallId}: {Leg} leg RTP timestamp jumped {Seconds:0.#}s (seq {Sequence}) - "
-                        + "resynchronising rather than filling silence.",
-                        callId,
-                        name,
-                        offset / (double)G711.ClockRate,
-                        frame.SequenceNumber);
-                }
-                else
-                {
-                    for (var i = 0; i < offset; i++)
-                    {
-                        Pending.Enqueue(0);
-                    }
-
-                    SilenceSamples += offset;
-                }
-            }
-
-            foreach (var encoded in frame.Payload)
-            {
-                Pending.Enqueue(G711.Decode(encoded));
-            }
-
-            _nextTimestamp = unchecked(frame.Timestamp + (uint)frame.Payload.Length);
-        }
     }
 }

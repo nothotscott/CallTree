@@ -11,9 +11,10 @@ you want a fully featured PBX, use a fully featured PBX.
 > **Status: in development.** Phases 0–5 are complete and validated over a real trunk — registration,
 > inbound signalling, prompt playback, the DTMF screening gate, recording calls from your own number, and
 > bridging an inbound caller to your mobile with both sides recorded all work, including a ringback tone
-> while your phone rings and a clean hangup from either side. The SvelteKit web UI has a call log, a
-> recordings browser with playback, a status page and a settings page. See [PROGRESS.md](PROGRESS.md) and
-> [TODO.md](TODO.md).
+> while your phone rings and a clean hangup from either side. An outbound proxy dial (`*{NUMBER}#` while on
+> a call from your own number, placing a second leg from your DID) is written and unit-tested but not yet
+> validated over the trunk. The SvelteKit web UI has a call log, a recordings browser with playback, a
+> status page and a settings page. See [PROGRESS.md](PROGRESS.md) and [TODO.md](TODO.md).
 
 ## How it works
 
@@ -21,7 +22,9 @@ One number; every call to or from it passes through CallTree, which classifies e
 
 - **`CallSource.Outbound`** — the caller ID matches your own mobile (`Telephony:MyCellNumber`). The call is
   auto-answered and recorded immediately. You then use your phone's native three-way merge to add the other
-  party, so a single mono leg captures both sides of the conversation.
+  party, so a single mono leg captures both sides of the conversation. Alternatively, dialing `*{NUMBER}#`
+  places a second leg from your DID instead — an outbound calling proxy, so the far end sees your DID
+  rather than your real mobile number. That party's audio is mixed live into the same recording.
 - **`CallSource.Inbound`** — anyone else. They hear a prompt and must press a digit to get through, which
   turns away most automated spam. Once past the gate the call is bridged to your mobile and recorded in
   stereo, one leg per channel.
@@ -153,11 +156,12 @@ Prompts live in `CallTree.Api/prompts/` as ordinary `.wav` files, loaded once at
 | `greeting.wav` | On answer to an inbound caller — the recording disclosure and the press-1 instruction |
 | `accepted.wav` | The caller pressed the right digit |
 | `rejected.wav` | Wrong digit, no input before the timeout, or a failed PIN |
-| `recording-notice.wav` | To *you*, on a call from your own number, just before recording starts |
+| `recording-reminder.wav` | To *you*, on a call from your own number, just before recording starts |
+| `recording-notice.wav` | To the party reached by an outbound proxy dial (`*{NUMBER}#`), on answer |
 | `pin-request.wav` | Asks for `Telephony:OutboundPin`. Only used when one is configured |
 | `recording-tone.wav` | The periodic tone, when `Telephony:RecordingToneIntervalSeconds` is non-zero |
 | `apology.wav` | To an Inbound caller whose bridge to your mobile went unanswered, before hanging up |
-| `ringing.wav` | Looped to an Inbound caller while your mobile rings, so they aren't in dead silence |
+| `ringing.wav` | Looped while a second leg you placed (Inbound bridge or outbound proxy dial) rings |
 
 They are a content directory rather than embedded resources specifically so the wording can change without
 a rebuild. The ones in the repository are synthesised placeholders; regenerate them, or edit the text
@@ -182,11 +186,17 @@ about to tell someone they are being recorded.
 A call from your own number is answered, optionally gated by `Telephony:OutboundPin`, and then recorded to
 a mono 16-bit WAV under `Storage:RecordingsRoot`, grouped by month and named for the call.
 
-Only *received* audio is captured — which is the whole point of the design. You add the other party with
-your phone's own three-way merge, so by the time it matters this single leg already carries both voices
-mixed together, and CallTree needs no second leg and no mixing to record a two-party conversation.
+Only *received* audio is captured by default — which is the point of the native three-way merge: your
+phone's carrier mixes both voices before RTP ever reaches CallTree, so a single leg already carries the
+whole conversation and CallTree needs no second leg and no mixing.
 
-A screened-in inbound call works differently: there really are two legs (the caller, and the bridge to
+Dialing `*{NUMBER}#` is different: CallTree places that second leg itself, so unlike the native merge it
+*is* told about it, and has to do the mixing a carrier would otherwise have done — the proxy-dialed party's
+decoded audio is summed live, sample for sample, into the same ongoing mono file (clamped rather than
+wrapped on the rare peak where both sides are loud at once). One continuous recording either way, whether
+or not — or how many times — the proxy dial gets used during the call.
+
+A screened-in inbound call works differently again: there really are two legs (the caller, and the bridge to
 your mobile), so it is recorded to a **stereo** WAV instead — left channel the caller, right channel your
 mobile. The two legs have unrelated RTP clocks with nothing to align them to, so this file is driven by a
 shared wall clock rather than either leg's own RTP timestamp: each leg gets its own reordering and
@@ -215,15 +225,20 @@ CallTree does not and cannot make this decision for you.
 There is a structural gap you need to understand before using the recording path:
 
 - Inbound callers hear `greeting.wav`, which carries a spoken notice.
-- On a call from your own number, `recording-notice.wav` is played **to you** — and only to you. The party
-  you merge in afterwards joins through your handset, which CallTree is never told about. They will not
-  hear any spoken notice, ever.
+- On a call from your own number, `recording-reminder.wav` is played **to you** — and only to you. A party
+  you add through your handset's *native* three-way merge joins without CallTree ever being told, and they
+  will not hear any spoken notice, ever.
 
 The only disclosure CallTree can make mechanically to that party is the periodic tone, enabled by setting
 `Telephony:RecordingToneIntervalSeconds`. It is **off by default**, which means that out of the box,
-disclosing to the merged-in party is entirely your job and has to be done out loud. Turning the tone on
+disclosing to a natively-merged party is entirely your job and has to be done out loud. Turning the tone on
 does not by itself make the recording lawful either — the interval, the wording and whether a tone is
 even accepted as consent all vary.
+
+This gap does not apply to a party you reach through `*{NUMBER}#` (the outbound proxy dial): CallTree
+placed that leg itself, so `recording-notice.wav` ("This call is being recorded") actually reaches them
+directly, the moment they answer. That does not make it a substitute for understanding your jurisdiction's
+rules — it is simply the one path here where CallTree can disclose on your behalf at all.
 
 This is not legal advice. If you deploy this, work out what your jurisdiction requires first.
 
@@ -240,12 +255,14 @@ Two mitigations, and you want both:
 2. **Restrict your router's port forwards by source address.** Importable address lists for several trunk
    providers are in [`deploy/firewall/`](deploy/firewall/).
 
-Separately, **`Telephony:OutboundPin`** guards the recording path. Without it, the only thing between a
-stranger and a call that is answered automatically and recorded is a caller ID match, and caller ID is
-trivially forged — the worst that buys an attacker on this specific path is a junk recording and some
-disk, since it never dials anywhere itself. It is blank by default so that bringing the recording path up
-did not require deciding this first — but decide it, especially now that Phase 4 means this codebase does
-place real outbound calls elsewhere, and a forged identity is worth taking seriously project-wide.
+Separately, **`Telephony:OutboundPin`** guards the recording path — and now, more than a junk recording,
+it guards **the outbound proxy dial**. Without a PIN, the only thing between a stranger and a call that is
+answered automatically, recorded, and free to dial `*{NUMBER}#` to place a real outbound call from your DID
+is a caller ID match, and caller ID is trivially forged. Unlike the Inbound bridge (which only ever dials
+the one number in `Telephony:MyCellNumber`), the proxy dial places a call to *whatever number the caller
+enters* — a spoofed caller ID that gets past a missing PIN is not a junk recording, it is an open outbound
+dialer at your trunk's expense. It is blank by default so that bringing the recording path up did not
+require deciding this first — but decide it before relying on the proxy dial specifically.
 
 Also disable SIP ALG on your router if it has one; it rewrites SIP messages in flight and causes one-way
 audio that is very hard to diagnose.

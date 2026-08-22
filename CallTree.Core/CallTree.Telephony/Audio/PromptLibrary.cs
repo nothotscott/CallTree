@@ -18,9 +18,18 @@ public static class PromptNames
     public const string Rejected = "rejected";
 
     /// <summary>
-    /// Played to the Outbound-source caller before recording starts. This is the disclosure the operator
-    /// hears; the party they merge in afterwards never hears it, because the merge happens on the handset
-    /// and CallTree is not told about it. See <c>Telephony:RecordingToneIntervalSeconds</c>.
+    /// Played to the Outbound-source operator before recording starts - a reminder, not a notice: they
+    /// already know they are being recorded, this is telling them to disclose it to whoever they merge in
+    /// afterwards, since the merge happens on the handset and CallTree is not told about it. See
+    /// <c>Telephony:RecordingToneIntervalSeconds</c>.
+    /// </summary>
+    public const string RecordingReminder = "recording-reminder";
+
+    /// <summary>
+    /// "This call is being recorded" - played to the party reached by an outbound proxy dial
+    /// (<c>*{NUMBER}#</c> on the Outbound-source path) once they answer, before their audio is mixed into
+    /// the recording. Unlike <see cref="RecordingReminder"/>'s party, CallTree placed this leg itself, so
+    /// it can actually disclose to them directly rather than relying on the operator to say it out loud.
     /// </summary>
     public const string RecordingNotice = "recording-notice";
 
@@ -58,11 +67,19 @@ public sealed class PromptLibrary
     /// Prompts every deployment needs. <see cref="PromptNames.PinRequest"/> and
     /// <see cref="PromptNames.RecordingTone"/> are left out because they belong to features that are off
     /// unless configured; warning about them unconditionally would train the operator to ignore the
-    /// warning that matters. <see cref="PromptNames.RecordingNotice"/> is in the list precisely because
-    /// it must never go missing quietly.
+    /// warning that matters. <see cref="PromptNames.RecordingReminder"/> and
+    /// <see cref="PromptNames.RecordingNotice"/> are both in the list precisely because a disclosure prompt
+    /// must never go missing quietly - the latter is the one mechanism that can actually inform a
+    /// proxy-dialed third party directly.
     /// </summary>
     private static readonly string[] RequiredPrompts =
-        [PromptNames.Greeting, PromptNames.Accepted, PromptNames.Rejected, PromptNames.RecordingNotice];
+    [
+        PromptNames.Greeting,
+        PromptNames.Accepted,
+        PromptNames.Rejected,
+        PromptNames.RecordingReminder,
+        PromptNames.RecordingNotice,
+    ];
 
     private readonly Dictionary<string, PcmAudio> _prompts = new(StringComparer.OrdinalIgnoreCase);
     private readonly ILogger<PromptLibrary> _logger;

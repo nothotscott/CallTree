@@ -543,7 +543,7 @@ public class TelephonyBackgroundService(
         }
 
         // Before the recorder opens, so the disclosure cannot end up inside the file it is disclosing.
-        await player.PlayAsync(PromptNames.RecordingNotice, interrupt: null, cancellationToken);
+        await player.PlayAsync(PromptNames.RecordingReminder, interrupt: null, cancellationToken);
 
         var startedAt = DateTimeOffset.UtcNow;
         var location = recordings.Locate(callId, startedAt);
@@ -599,7 +599,39 @@ public class TelephonyBackgroundService(
 
         try
         {
-            await WaitForHangupAsync(player, telephony.RecordingToneIntervalSeconds, cancellationToken);
+            // Runs for the call's whole duration, independent of any proxy dial - the tone is an ongoing
+            // consent mechanism for the operator's own leg, not something a proxy segment should pause.
+            var toneTask = WaitForHangupAsync(player, telephony.RecordingToneIntervalSeconds, cancellationToken);
+            var proxyDialCollector = new ProxyDialCollector(userAgent, _logger);
+
+            while (true)
+            {
+                // A fresh dial-wait each iteration; toneTask is not recreated, or two overlapping
+                // WaitForHangupAsync loops would fight over the same shared audio source.
+                var dialTask = proxyDialCollector.WaitForDialSequenceAsync(cancellationToken);
+
+                if (await Task.WhenAny(toneTask, dialTask) == toneTask)
+                {
+                    break;
+                }
+
+                PhoneNumber target;
+                try
+                {
+                    target = await dialTask;
+                }
+                catch (OperationCanceledException)
+                {
+                    break;
+                }
+
+                // Deliberately not intercepted while this runs: DTMF during an active proxy segment
+                // belongs to the proxy-dialed party (e.g. navigating their own phone menu), not to a new
+                // *{NUMBER}# attempt.
+                await RunProxyDialAsync(callId, userAgent, mediaSession, player, recorder, target, cancellationToken);
+            }
+
+            await toneTask;
         }
         finally
         {
@@ -633,6 +665,217 @@ public class TelephonyBackgroundService(
     }
 
     /// <summary>
+    /// One <c>*{NUMBER}#</c> attempt on the Outbound-source path: places the outbound leg from the DID,
+    /// and if it answers, discloses the recording to the third party, relays RTP both directions, mixes
+    /// their audio into the already-open <paramref name="recorder"/>, and waits until either the proxy
+    /// party hangs up (ends only this segment) or the operator does (the caller's own cancellation ends
+    /// the whole call, observed here the same way).
+    /// </summary>
+    private async Task RunProxyDialAsync(
+        Guid callId,
+        SIPUserAgent primaryAgent,
+        NatAwareVoIPMediaSession primaryMedia,
+        PromptPlayer primaryPlayer,
+        CallRecorder recorder,
+        PhoneNumber target,
+        CancellationToken cancellationToken)
+    {
+        var did = DidNumber;
+        if (did is null)
+        {
+            _logger.LogError(
+                "Call {CallId}: dialed a proxy call to {Target} but Telephony:DidNumber is not set or is not "
+                + "a valid number - ignoring.",
+                callId,
+                target);
+            return;
+        }
+
+        var result = await PlaceOutboundLegAsync(callId, target, did, primaryPlayer, cancellationToken);
+        if (!result.Answered)
+        {
+            _logger.LogInformation("Call {CallId}: proxy dial to {Destination} did not answer.", callId, result.Destination);
+            return;
+        }
+
+        var proxyAgent = result.Agent;
+        var proxyMedia = result.Media;
+        var proxyAudio = result.Audio;
+
+        try
+        {
+            // Disclosed to the third party before mixing starts, so the notice itself never lands inside
+            // the recording it discloses - the same rule the operator's own reminder already follows.
+            var proxyPlayer = new PromptPlayer(proxyAudio, prompts, () => proxyAgent.IsCallActive);
+            await proxyPlayer.PlayAsync(PromptNames.RecordingNotice, interrupt: null, cancellationToken);
+
+            recorder.AttachSecondaryLeg();
+
+            // Paced, not just reordered - see PacedRtpRelay's remarks for why sending a packet the instant
+            // it arrives is still choppy (with gradually increasing lag) even after reordering alone.
+            var jitterDepth = TimeSpan.FromMilliseconds(telephonyOptions.CurrentValue.JitterBufferMilliseconds);
+            var toProxyRelay = new PacedRtpRelay(callId, "primary->proxy", jitterDepth, proxyMedia, _logger);
+            var toPrimaryRelay = new PacedRtpRelay(callId, "proxy->primary", jitterDepth, primaryMedia, _logger);
+
+            void RelayToProxy(IPEndPoint remote, SDPMediaTypesEnum mediaType, RTPPacket packet)
+            {
+                if (mediaType == SDPMediaTypesEnum.audio)
+                {
+                    toProxyRelay.Offer(packet.Header.PayloadType, packet.Header.Timestamp, packet.Header.SequenceNumber, packet.Payload);
+                }
+            }
+
+            void RelayToPrimary(IPEndPoint remote, SDPMediaTypesEnum mediaType, RTPPacket packet)
+            {
+                if (mediaType == SDPMediaTypesEnum.audio)
+                {
+                    toPrimaryRelay.Offer(packet.Header.PayloadType, packet.Header.Timestamp, packet.Header.SequenceNumber, packet.Payload);
+                }
+            }
+
+            void MixProxyAudio(IPEndPoint remote, SDPMediaTypesEnum mediaType, RTPPacket packet)
+            {
+                if (mediaType == SDPMediaTypesEnum.audio)
+                {
+                    recorder.AcceptSecondary(
+                        packet.Header.PayloadType, packet.Header.Timestamp, packet.Header.SequenceNumber, packet.Payload);
+                }
+            }
+
+            primaryMedia.OnRtpPacketReceived += RelayToProxy;
+            proxyMedia.OnRtpPacketReceived += RelayToPrimary;
+            proxyMedia.OnRtpPacketReceived += MixProxyAudio;
+
+            _logger.LogInformation("Call {CallId}: proxy dial connected to {Destination}", callId, result.Destination);
+
+            try
+            {
+                // A proxy-party hangup ends only this segment - the operator's own call keeps going. Its
+                // own completion source rather than the shared-CTS trick BridgeToMobileAsync uses for the
+                // mobile leg, since that trick's whole point is to end the *entire* call - the opposite of
+                // what belongs here.
+                var proxyHungUp = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                proxyAgent.OnCallHungup += dialogue => proxyHungUp.TrySetResult();
+
+                await Task.WhenAny(proxyHungUp.Task, PromptPlayer.WhenCancelled(cancellationToken));
+            }
+            finally
+            {
+                primaryMedia.OnRtpPacketReceived -= RelayToProxy;
+                proxyMedia.OnRtpPacketReceived -= RelayToPrimary;
+                proxyMedia.OnRtpPacketReceived -= MixProxyAudio;
+                // Awaited so the pump loops are fully stopped before the media sessions get closed below.
+                await toProxyRelay.DisposeAsync();
+                await toPrimaryRelay.DisposeAsync();
+                recorder.DetachSecondaryLeg();
+            }
+        }
+        finally
+        {
+            await proxyAudio.CloseAudio();
+            if (proxyAgent.IsCallActive)
+            {
+                proxyAgent.Hangup();
+            }
+        }
+    }
+
+    /// <summary>What placing one outbound leg through the trunk turned out to be.</summary>
+    /// <param name="Answered">
+    /// Whether the leg is now live. When <see langword="false"/>, <see cref="PlaceOutboundLegAsync"/> has
+    /// already closed <paramref name="Audio"/> and hung up <paramref name="Agent"/> - there is nothing
+    /// left for the caller to do. When <see langword="true"/>, the caller owns all three and must
+    /// eventually tear them down itself.
+    /// </param>
+    private readonly record struct OutboundLegResult(
+        bool Answered, SIPUserAgent Agent, NatAwareVoIPMediaSession Media, AudioExtrasSource Audio, string Destination);
+
+    /// <summary>
+    /// Places one outbound leg through the trunk, from <paramref name="callerId"/> to
+    /// <paramref name="target"/>, playing <see cref="PromptNames.Ringing"/> to
+    /// <paramref name="ringbackPlayer"/> for as long as the attempt is in flight. Deliberately agnostic
+    /// about *why* - the Inbound bridge (dialing the configured mobile) and the Outbound-source proxy dial
+    /// (dialing whatever number the operator entered) both call this, and a future Web-softphone trigger
+    /// should be able to as well without this method changing.
+    /// </summary>
+    private async Task<OutboundLegResult> PlaceOutboundLegAsync(
+        Guid callId,
+        PhoneNumber target,
+        PhoneNumber callerId,
+        PromptPlayer ringbackPlayer,
+        CancellationToken cancellationToken)
+    {
+        var trunk = trunkOptions.CurrentValue;
+        var telephony = telephonyOptions.CurrentValue;
+
+        var agent = new SIPUserAgent(_sipTransport, null);
+        var (media, audio) = CreateMediaSession();
+
+        var server = TrunkServer(trunk);
+        var dst = $"sip:{target.Value.TrimStart('+')}@{server}";
+        var from = $"<sip:{callerId.Value.TrimStart('+')}@{server}>";
+        _logger.LogInformation("Call {CallId}: dialing {Destination} from {From}", callId, dst, from);
+
+        // The simple SIPUserAgent.Call(dst, username, password, ...) overload builds its own
+        // SIPCallDescriptor with no From set, which left the trunk to infer a caller ID from the SIP
+        // username - not a phone number, and exactly what Telnyx rejected with
+        // "403 Caller Origination Number is Invalid". Building the descriptor ourselves is the only way
+        // to pin From to whichever number we are dialing out as.
+        var callDescriptor = new SIPCallDescriptor(
+            trunk.Username,
+            trunk.Password,
+            dst,
+            from,
+            to: null,
+            routeSet: null,
+            customHeaders: null,
+            authUsername: null,
+            callDirection: SIPCallDirection.Out,
+            contentType: null,
+            content: null,
+            mangleIPAddress: null);
+
+        // Ringing plays for as long as the attempt is in flight - otherwise whoever is waiting sits in
+        // dead silence. Its own token is linked (not cancellationToken itself) so it can be stopped the
+        // instant the dial resolves, rather than only on cancellation, without racing whatever the caller
+        // plays next onto the same audio source.
+        using var ringingCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        var ringingTask = PlayRingingAsync(ringbackPlayer, ringingCts.Token);
+
+        bool answered;
+        try
+        {
+            var callTask = agent.Call(callDescriptor, media, telephony.DialTimeoutSeconds);
+            var abandoned = PromptPlayer.WhenCancelled(cancellationToken);
+
+            answered = await Task.WhenAny(callTask, abandoned) != abandoned && await callTask;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Call {CallId}: placing a call to {Destination} failed.", callId, dst);
+            answered = false;
+        }
+        finally
+        {
+            // Cancel-and-await rather than fire-and-forget: PlayAsync must actually stop touching the
+            // shared audio source before the caller is allowed to use it for anything else.
+            ringingCts.Cancel();
+            await ringingTask;
+        }
+
+        if (!answered)
+        {
+            await audio.CloseAudio();
+            if (agent.IsCallActive)
+            {
+                agent.Hangup();
+            }
+        }
+
+        return new OutboundLegResult(answered, agent, media, audio, dst);
+    }
+
+    /// <summary>
     /// The Inbound bridge: place a second SIP leg to the configured mobile, and if it answers, relay RTP
     /// both directions and record both legs until either side hangs up. If it never answers, the caller
     /// hears <see cref="PromptNames.Apology"/> and the call lands in <see cref="CallStatus.Missed"/>.
@@ -646,8 +889,6 @@ public class TelephonyBackgroundService(
         CancellationTokenSource hangup)
     {
         var cancellationToken = hangup.Token;
-        var telephony = telephonyOptions.CurrentValue;
-        var trunk = trunkOptions.CurrentValue;
         var target = MyCellNumber;
 
         if (target is null)
@@ -678,16 +919,45 @@ public class TelephonyBackgroundService(
             return;
         }
 
-        var outboundAgent = new SIPUserAgent(_sipTransport, null);
-        var (outboundMedia, outboundAudio) = CreateMediaSession();
-
         // A locally-generated correlation id. SIPSorcery mints the real wire Call-ID internally when
         // Call() sends the INVITE and does not surface it beforehand - confirm against Telephony:TraceSip
         // output during phone validation if the two need to line up exactly.
         var outboundSipCallId = $"bridge-{Guid.NewGuid():N}";
+        await calls.ExecuteAsync(
+            new BeginDialing(callId, DateTimeOffset.UtcNow, target, outboundSipCallId), cancellationToken);
+
+        var result = await PlaceOutboundLegAsync(callId, target, did, inboundPlayer, cancellationToken);
+
+        if (!result.Answered)
+        {
+            if (cancellationToken.IsCancellationRequested)
+            {
+                // The caller hung up while the mobile was still ringing. The inbound leg's own
+                // OnCallHungup handler has already ended the call, and PlaceOutboundLegAsync has already
+                // cleaned up - nothing more to do.
+                return;
+            }
+
+            _logger.LogInformation(
+                "Call {CallId}: {Destination} did not answer within {Timeout}s",
+                callId, result.Destination, telephonyOptions.CurrentValue.DialTimeoutSeconds);
+            await inboundPlayer.PlayAsync(PromptNames.Apology, interrupt: null, cancellationToken);
+            await endOnceAsync(
+                new EndCall(callId, DateTimeOffset.UtcNow, HangupInitiator.Remote, "mobile did not answer"),
+                "mobile did not answer");
+            return;
+        }
+
+        var outboundAgent = result.Agent;
+        var outboundMedia = result.Media;
+        var outboundAudio = result.Audio;
 
         try
         {
+            // Subscribed after answer rather than before dialing (as the pre-refactor version did):
+            // OnCallHungup fires for an established dialogue being torn down, which cannot happen before
+            // PlaceOutboundLegAsync has already reported Answered. The gap between that result and this
+            // subscription is synchronous - no await in between - so the exposure is negligible.
             outboundAgent.OnCallHungup += dialogue =>
             {
                 // Cancel the shared token directly rather than relying on inboundAgent.Hangup() below to
@@ -710,86 +980,8 @@ public class TelephonyBackgroundService(
                 }
             };
 
-            await calls.ExecuteAsync(
-                new BeginDialing(callId, DateTimeOffset.UtcNow, target, outboundSipCallId), cancellationToken);
-
-            var server = TrunkServer(trunk);
-            var dst = $"sip:{target.Value.TrimStart('+')}@{server}";
-            var from = $"<sip:{did.Value.TrimStart('+')}@{server}>";
-            _logger.LogInformation(
-                "Call {CallId}: dialing {Destination} from {From} to bridge the caller", callId, dst, from);
-
-            // The simple SIPUserAgent.Call(dst, username, password, ...) overload builds its own
-            // SIPCallDescriptor with no From set, which left the trunk to infer a caller ID from the SIP
-            // username - not a phone number, and exactly what Telnyx rejected with
-            // "403 Caller Origination Number is Invalid". Building the descriptor ourselves is the only
-            // way to pin From to the DID.
-            var callDescriptor = new SIPCallDescriptor(
-                trunk.Username,
-                trunk.Password,
-                dst,
-                from,
-                to: null,
-                routeSet: null,
-                customHeaders: null,
-                authUsername: null,
-                callDirection: SIPCallDirection.Out,
-                contentType: null,
-                content: null,
-                mangleIPAddress: null);
-
-            // Ringing plays to the caller for as long as the dial attempt is in flight - otherwise they
-            // sit in dead silence while the mobile rings. Its own token is linked (not the same as
-            // cancellationToken) so it can be stopped the instant the dial resolves, rather than only on
-            // a caller hangup, without racing PromptNames.Apology onto the same audio source below.
-            using var ringingCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-            var ringingTask = PlayRingingAsync(inboundPlayer, ringingCts.Token);
-
-            bool answered;
-            try
-            {
-                var callTask = outboundAgent.Call(callDescriptor, outboundMedia, telephony.DialTimeoutSeconds);
-                var abandoned = PromptPlayer.WhenCancelled(cancellationToken);
-
-                if (await Task.WhenAny(callTask, abandoned) == abandoned)
-                {
-                    // The caller hung up while the mobile was still ringing. The inbound leg's own
-                    // OnCallHungup handler has already ended the call; just stop ringing the mobile.
-                    if (outboundAgent.IsCallActive)
-                    {
-                        outboundAgent.Hangup();
-                    }
-                    return;
-                }
-
-                answered = await callTask;
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Call {CallId}: placing the bridge call to {Destination} failed.", callId, dst);
-                answered = false;
-            }
-            finally
-            {
-                // Cancel-and-await rather than fire-and-forget: PlayAsync must actually stop touching the
-                // shared audio source before Apology (or the bridge itself) is allowed to use it.
-                ringingCts.Cancel();
-                await ringingTask;
-            }
-
-            if (!answered)
-            {
-                _logger.LogInformation(
-                    "Call {CallId}: {Destination} did not answer within {Timeout}s", callId, dst, telephony.DialTimeoutSeconds);
-                await inboundPlayer.PlayAsync(PromptNames.Apology, interrupt: null, cancellationToken);
-                await endOnceAsync(
-                    new EndCall(callId, DateTimeOffset.UtcNow, HangupInitiator.Remote, "mobile did not answer"),
-                    "mobile did not answer");
-                return;
-            }
-
             await calls.ExecuteAsync(new BridgeCall(callId, DateTimeOffset.UtcNow), cancellationToken);
-            _logger.LogInformation("Call {CallId}: bridged to {Destination}", callId, dst);
+            _logger.LogInformation("Call {CallId}: bridged to {Destination}", callId, result.Destination);
 
             await RunBridgeAsync(callId, inboundMedia, outboundMedia, cancellationToken);
         }
@@ -813,28 +1005,35 @@ public class TelephonyBackgroundService(
         NatAwareVoIPMediaSession outboundMedia,
         CancellationToken cancellationToken)
     {
+        var telephony = telephonyOptions.CurrentValue;
+        var jitterDepth = TimeSpan.FromMilliseconds(telephony.JitterBufferMilliseconds);
+
+        // Paced, not just reordered: see PacedRtpRelay's remarks for why sending a packet the instant it
+        // arrives was still choppy (with gradually increasing lag) even after reordering fixed correctness.
+        var toOutboundRelay = new PacedRtpRelay(callId, "caller->mobile", jitterDepth, outboundMedia, _logger);
+        var toInboundRelay = new PacedRtpRelay(callId, "mobile->caller", jitterDepth, inboundMedia, _logger);
+
         // Non-PCMU payloads (notably 101, the RFC 4733 telephone-event stream) are dropped at the door -
         // relaying DTMF is out of scope, and decoding it as audio would inject noise into either leg.
         void RelayToOutbound(IPEndPoint remote, SDPMediaTypesEnum mediaType, RTPPacket packet)
         {
-            if (mediaType == SDPMediaTypesEnum.audio && packet.Header.PayloadType == G711.PcmuPayloadType)
+            if (mediaType == SDPMediaTypesEnum.audio)
             {
-                outboundMedia.SendRtpRaw(SDPMediaTypesEnum.audio, packet.Payload, packet.Header.Timestamp, 0, packet.Header.PayloadType);
+                toOutboundRelay.Offer(packet.Header.PayloadType, packet.Header.Timestamp, packet.Header.SequenceNumber, packet.Payload);
             }
         }
 
         void RelayToInbound(IPEndPoint remote, SDPMediaTypesEnum mediaType, RTPPacket packet)
         {
-            if (mediaType == SDPMediaTypesEnum.audio && packet.Header.PayloadType == G711.PcmuPayloadType)
+            if (mediaType == SDPMediaTypesEnum.audio)
             {
-                inboundMedia.SendRtpRaw(SDPMediaTypesEnum.audio, packet.Payload, packet.Header.Timestamp, 0, packet.Header.PayloadType);
+                toInboundRelay.Offer(packet.Header.PayloadType, packet.Header.Timestamp, packet.Header.SequenceNumber, packet.Payload);
             }
         }
 
         inboundMedia.OnRtpPacketReceived += RelayToOutbound;
         outboundMedia.OnRtpPacketReceived += RelayToInbound;
 
-        var telephony = telephonyOptions.CurrentValue;
         var startedAt = DateTimeOffset.UtcNow;
         var location = recordings.Locate(callId, startedAt);
 
@@ -883,6 +1082,9 @@ public class TelephonyBackgroundService(
         {
             inboundMedia.OnRtpPacketReceived -= RelayToOutbound;
             outboundMedia.OnRtpPacketReceived -= RelayToInbound;
+            // Awaited so the pump loops are fully stopped before the media sessions get closed below.
+            await toOutboundRelay.DisposeAsync();
+            await toInboundRelay.DisposeAsync();
 
             if (recorder is not null)
             {
