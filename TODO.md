@@ -11,20 +11,21 @@ real to render.
 ## Immediate
 
 - [x] Choose and add a **licence** — MIT, in [LICENSE.md](LICENSE.md).
-- [ ] Decide the **consent disclosure wording** and regenerate the prompts with
-      `tools/generate-prompts.ps1`. The current greeting ("This call will be recorded") is a placeholder
-      chosen to err toward disclosing. Recording law varies by jurisdiction and several require *all*
-      parties to consent — this is a decision the operator has to make, not one to inherit from a default.
-- [ ] Decide whether to enable the **recording tone** (`Telephony:RecordingToneIntervalSeconds`, off by
-      default) and at what interval. This is the *only* disclosure the outbound path can make to the
-      party added by the handset's three-way merge: they never hear `recording-notice.wav`, because
-      CallTree is not told the merge happened. Out of the box, telling them is the operator's job and
-      has to be done out loud.
+- [x] Decide the **consent disclosure approach**. Operator decision: the spoken notice on each path
+      (`greeting.wav` for Inbound, `recording-notice.wav` for Outbound) is sufficient — confirmed audible
+      on real calls — and the periodic **recording tone stays off** (`Telephony:RecordingToneIntervalSeconds`
+      remains `0`, not just its default). The structural gap is unchanged and still applies: on the
+      Outbound path this notice reaches only the operator, never the party merged in later by the
+      handset — see [Recording consent](README.md#recording-consent--read-this).
 - [ ] Replace the synthesised placeholder prompts with real recordings. Six now, not three —
       `recording-notice` and `pin-request` were added in Phase 3, and `recording-tone` is a generated
-      1400 Hz tone rather than speech.
+      1400 Hz tone rather than speech. Wording itself is unchanged by the decision above; regenerate with
+      `tools/generate-prompts.ps1` if it ever needs to change.
 
-## Security — before Phase 4
+## Security — before real inbound traffic is bridged out to the trunk
+
+Phase 4 can now place a real outbound leg, so a spoofed or successfully-guessed screening pass turns a
+probe into a phone bill rather than just disk usage — see PROGRESS.md.
 
 - [x] **Reject INVITEs not addressed to our DID** (`Telephony:DidNumber`, 404 before any Call row is
       created). Scanners sweep dial-plan prefixes (`011…`, `9011…`, `00…`, bare) aimed at premium-rate
@@ -40,11 +41,10 @@ real to render.
 - [ ] Consider rate-limiting or temporarily blocklisting sources that are repeatedly rejected — probes
       arrive in bursts and each still costs a SIP transaction.
 
-## Phase 3 — Outbound-source path + mono recording
+## Phase 3 — Outbound-source path + mono recording ✅ (validated by phone)
 
-**Written and unit-tested; not yet validated over the trunk.** The RTP tap, the DTMF PIN entry and the
-new prompts have never run against a real call — only against unit tests that feed the recorder packets
-directly. This phase is not done until a real call has been placed.
+Confirmed against a real call: the notice played, the PIN gate worked, and the resulting `.wav` played
+back correctly.
 
 - [x] Auto-answer calls classified `Outbound` (caller ID matches the configured mobile) and record:
       G.711 → PCM decode, reordering buffer (`Telephony:JitterBufferMilliseconds`, 60 ms), silence-fill
@@ -59,33 +59,45 @@ directly. This phase is not done until a real call has been placed.
       `Telephony:OutboundPin`, **blank by default** so the phase can be brought up without settling it.
       A failed PIN lands the call in `ScreenedOut`, so a spoofing attempt is distinguishable in the log
       from a call that simply finished. Still worth an explicit decision before Phase 4.
-- [ ] **Validate by phone**: call the DID from the mobile, confirm the notice plays, hang up, and check
+- [x] **Validate by phone**: call the DID from the mobile, confirm the notice plays, hang up, and check
       the WAV plays back at the right length with both sides audible after a three-way merge.
-- [ ] The consent disclosure decision is still open — see Immediate. The mechanisms now exist
-      (`recording-notice.wav`, and a periodic tone via `Telephony:RecordingToneIntervalSeconds`); what
-      is undecided is the wording, the interval, and whether a tone is required at all.
+- [x] The consent disclosure decision — see Immediate. Decided: the spoken notice
+      (`recording-notice.wav`) is sufficient; the periodic tone via `Telephony:RecordingToneIntervalSeconds`
+      stays off.
 
-## Phase 4 — Inbound bridge
+## Phase 4 — Inbound bridge ✅ (validated by phone)
 
-- [ ] On a successful gate: place an outbound leg to the configured mobile (second `SIPUserAgent`) and
+Confirmed against real calls: the bridge connects with two-way audio, a caller hangup ends the mobile leg,
+a mobile hangup ends the caller leg, and an unanswered ring lands in `Missed` with the apology prompt
+heard. See PROGRESS.md for what shipped and what was deliberately left out of this pass (no
+`CallSession`/`ActiveCallRegistry` refactor, no DTMF passthrough) and remains open below.
+
+- [x] On a successful gate: place an outbound leg to the configured mobile (second `SIPUserAgent`) and
       bridge RTP both directions (payload relay; no transcode while both legs are PCMU).
-- [ ] Failure handling: no-answer timeout → apology prompt → `Missed`; either side hangs up → clean teardown.
-- [ ] Refactor per-call handling out of `TelephonyBackgroundService` into a `CallSession` runtime class plus
-      an `ActiveCallRegistry`. Phases 1–2 deliberately kept it inline.
-- [ ] Replace `Call.CompleteScreening` (the Phase 2 stand-in for "passed the gate, nothing to bridge to")
+- [x] Failure handling: no-answer timeout (`Telephony:DialTimeoutSeconds`) → apology prompt → `Missed`;
+      either side hangs up → the other is hung up too, exactly once.
+- [x] Replace `Call.CompleteScreening` (the Phase 2 stand-in for "passed the gate, nothing to bridge to")
       with `BeginDialing` + `Bridge`.
+- [x] Ringback tone (`ringing.wav`, 440+480 Hz looped with a 4s gap) plays to the caller for as long as the
+      outbound leg is ringing, so they aren't in dead silence while `Telephony:DialTimeoutSeconds` runs.
+      Added after phone testing surfaced the silence as worth fixing before calling the phase done.
+- [ ] Refactor per-call handling out of `TelephonyBackgroundService` into a `CallSession` runtime class plus
+      an `ActiveCallRegistry`. Deliberately deferred — see PROGRESS.md's scope note. Still worth doing before
+      Phase 6 needs to reason about more than one active call.
 - [ ] Replace the single long-lived `SIPUserAgent` with a per-call agent. One agent holds one dialogue, so a
-      second concurrent call — or a dialogue left behind by an abnormal teardown — is *silently dropped*
-      with no log line, which is indistinguishable from a network fault.
+      second concurrent *inbound* call — or a dialogue left behind by an abnormal teardown — is *silently
+      dropped* with no log line, which is indistinguishable from a network fault. Pre-existing since Phase 1;
+      not worsened by the bridge, which uses its own separate per-call agent for the outbound leg.
 - [ ] Re-check the trunk account's concurrency and per-call duration caps. A 10-minute ceiling would
       truncate recordings; some providers apply one on lower tiers.
 
-## Phase 5 — Bridged-call recording
+## Phase 5 — Bridged-call recording ✅ (the slice built alongside Phase 4, validated by phone)
 
-- [ ] Tap the decoded PCM of each leg into one stereo WAV (left = caller, right = the mobile) on a shared
-      20 ms clock. `CallRecorder` cannot be reused as-is: it writes from the RTP timestamp, and two legs
-      have two unrelated RTP clocks with nothing to align them to. This is the case that needs the wall
-      clock Phase 3 did without.
+- [x] Tap the decoded PCM of each leg into one stereo WAV (left = caller, right = the mobile) on a shared
+      wall clock (`BridgedCallRecorder`, draining a per-leg accumulator on packet arrival from either leg
+      rather than pacing off either leg's own RTP clock). `CallRecorder` was not reusable as-is: it writes
+      from the RTP timestamp, and two legs have two unrelated RTP clocks with nothing to align them to.
+      Confirmed by phone: both sides audible on their correct channel in the resulting recording.
 
 ## Phase 6 — Trunk resilience
 
@@ -154,12 +166,13 @@ show.
 
 ## Open decisions
 
-1. Consent disclosure approach and wording, and whether to turn the periodic tone on. The mechanisms are
-   built; what they say and when is not decided.
+1. ~~Consent disclosure approach, and whether to turn the periodic tone on.~~ **Decided**: the spoken
+   notice on each path is the disclosure; the tone stays off. See Immediate, above.
 2. Outbound-path authentication: caller-ID match only, or caller ID plus a PIN. Both are now supported —
    `Telephony:OutboundPin`, blank by default — so this is a configuration decision rather than a build
-   one. A PIN is the safer default given how easily caller ID is spoofed, and it matters much more once
-   Phase 4 can place an outbound leg.
+   one. A PIN is the safer default given how easily caller ID is spoofed, and it matters more now that
+   Phase 4 places a real outbound leg — a successful spam-gate pass now dials the trunk, at the trunk's
+   cost, not just disk.
 3. Retention policy — Phase 8.
 4. API and UI exposure and authentication — Phases 7–8. Recordings are sensitive; the default posture is
    LAN-only with no external exposure. Note the UI and API now share one port, so exposing one exposes

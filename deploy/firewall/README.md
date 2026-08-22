@@ -20,8 +20,8 @@ about 40 minutes** from four independent sources, all sweeping international dia
 someone else's behalf. `Telephony:DidNumber` rejects those in-process, but dropping them at the router is
 cheaper and stops them reaching the host at all.
 
-This matters more once outbound calling exists (Phase 4): until then a probe is noise, afterwards it is a
-potential phone bill.
+This matters more now that outbound calling exists (Phase 4, validated by phone): a probe that finds a way
+past the DID filter and the screening gate is a potential phone bill, not just noise.
 
 ## What is in the lists
 

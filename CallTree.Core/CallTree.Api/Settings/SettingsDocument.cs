@@ -28,6 +28,7 @@ public static class SettingsDocument
         $"{TelephonySection}:{nameof(TelephonyOptions.TraceSip)}",
         $"{TelephonySection}:{nameof(TelephonyOptions.ScreeningDigit)}",
         $"{TelephonySection}:{nameof(TelephonyOptions.ScreeningTimeoutSeconds)}",
+        $"{TelephonySection}:{nameof(TelephonyOptions.DialTimeoutSeconds)}",
         $"{TelephonySection}:{nameof(TelephonyOptions.JitterBufferMilliseconds)}",
         $"{TelephonySection}:{nameof(TelephonyOptions.RecordingToneIntervalSeconds)}",
         $"{TelephonySection}:{nameof(TelephonyOptions.OutboundPin)}",
@@ -51,6 +52,7 @@ public static class SettingsDocument
         TraceSip = options.TraceSip,
         ScreeningDigit = options.ScreeningDigit,
         ScreeningTimeoutSeconds = options.ScreeningTimeoutSeconds,
+        DialTimeoutSeconds = options.DialTimeoutSeconds,
         JitterBufferMilliseconds = options.JitterBufferMilliseconds,
         RecordingToneIntervalSeconds = options.RecordingToneIntervalSeconds,
         // OutboundPin is deliberately absent: it is a credential, and the response reports only whether
@@ -85,6 +87,7 @@ public static class SettingsDocument
         TraceSip = settings.TraceSip,
         ScreeningDigit = settings.ScreeningDigit,
         ScreeningTimeoutSeconds = settings.ScreeningTimeoutSeconds,
+        DialTimeoutSeconds = settings.DialTimeoutSeconds,
     };
 
     public static TrunkOptions Apply(TrunkOptions current, TrunkSettings settings, string? password) => current with
@@ -114,6 +117,7 @@ public static class SettingsDocument
         telephony[nameof(TelephonyOptions.TraceSip)] = update.Telephony.TraceSip;
         telephony[nameof(TelephonyOptions.ScreeningDigit)] = update.Telephony.ScreeningDigit;
         telephony[nameof(TelephonyOptions.ScreeningTimeoutSeconds)] = update.Telephony.ScreeningTimeoutSeconds;
+        telephony[nameof(TelephonyOptions.DialTimeoutSeconds)] = update.Telephony.DialTimeoutSeconds;
         telephony[nameof(TelephonyOptions.JitterBufferMilliseconds)] = update.Telephony.JitterBufferMilliseconds;
         telephony[nameof(TelephonyOptions.RecordingToneIntervalSeconds)] = update.Telephony.RecordingToneIntervalSeconds;
 

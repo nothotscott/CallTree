@@ -21,16 +21,23 @@ Naming note: `Outbound`/`Inbound` are **business** classifications; both start a
 
 ## Status
 
-Phases 0–2 complete and validated by real phone calls. **Phase 3 (Outbound-source path + mono recording)
-is written and unit-tested but has NOT been validated by phone** — the seam that has never run is
-SIPSorcery's `OnRtpPacketReceived` delivering real PCMU into `CallRecorder`, plus PIN entry and the new
-prompts. Do not treat it as done, and do not start Phase 4, until a real call has been placed and the WAV
-played back. The consent-disclosure decision is still open; Phase 3 ships the *mechanisms* (a spoken
-notice, and a periodic tone that is off by default) without deciding them.
+Phases 0–5 complete and validated by real phone calls — registration, inbound signalling, prompt playback,
+the DTMF screening gate, recording calls from your own number, and the inbound bridge (a screened-in
+caller placed on a second SIP leg to your mobile, relayed both directions, and recorded to a stereo WAV)
+all confirmed working end to end, including hangup from either side and an unanswered-ring `Missed`
+outcome with the apology prompt. See PROGRESS.md for what was deliberately left out of the bridge (no
+`CallSession`/`ActiveCallRegistry` refactor, no DTMF passthrough to the mobile leg) and for the caller-ID
+bring-up fault (`403 Caller Origination Number is Invalid`) worth knowing about before touching
+`BridgeToMobileAsync` again.
 
-**Current work is the frontend, taken ahead of Phase 3 deliberately.** Phase numbers are not being
-renumbered; they are referenced throughout TODO/PROGRESS. Note that a recordings browser needs Phase 7's
-REST API to have anything to show, so UI work runs ahead of its own data source until that lands.
+**Consent disclosure: decided.** The spoken notice on each path (`greeting.wav` Inbound,
+`recording-notice.wav` Outbound) is the operator's chosen disclosure, confirmed audible on real calls; the
+periodic recording tone (`Telephony:RecordingToneIntervalSeconds`) stays off. See the consent note below —
+the structural gap it describes (the Outbound path's merged-in party never hears anything) is unchanged by
+that decision, it is a property of the design.
+
+A recordings browser (`/recordings`, `/recordings/{id}` with playback) is built on top of Phase 7's REST
+API and already ships in the frontend.
 
 **Workflow rule: one phase at a time.** The maintainer validates each telephony phase by phone before the
 next begins.
@@ -63,8 +70,11 @@ Dependency direction: `Api → {Telephony, Infrastructure} → Application → D
 - The SIP UA lives **inside the API process** as a `BackgroundService`; one process serves HTTP and SIP/RTP.
 - Domain `Call` records history and enforces transition legality
   (`Ringing → Screening → Dialing → InProgress → Completed/ScreenedOut/Missed/Failed`); live SIPSorcery
-  objects never enter the Domain. Runtime per-call state belongs in Telephony (a `CallSession` class is the
-  planned shape once Phase 4 needs it).
+  objects never enter the Domain. Runtime per-call state belongs in Telephony. The inbound bridge
+  (`TelephonyBackgroundService.BridgeToMobileAsync`/`RunBridgeAsync`) deliberately stayed a call-local
+  method rather than introducing the `CallSession`/`ActiveCallRegistry` refactor TODO.md once described for
+  Phase 4 — see PROGRESS.md's scope note. That refactor is still the planned shape once something actually
+  needs to reason about more than one active call at a time; don't add it speculatively before then.
 - **Telephony never opens DI scopes itself.** It describes what happened as a `CallCommand` and hands it to
   `ICallCommands`, which resolves `CallLifecycleService` in a fresh scope per command. `DbContext` is
   scoped and telephony callbacks are long-lived, so there is no ambient scope to join — but that plumbing
@@ -135,6 +145,15 @@ stage and copies them into the API's `wwwroot`. One container, one port, one ori
   cannot tie the binding to a connection, its portal reads `Unregistered` with every field `null`, and
   inbound calls have no destination, so the caller hears a busy tone. A `sip_username: null` in a provider's
   registration status is the tell: it is reporting the *Contact* user, which we weren't sending.
+- **Placing an outbound call needs its own `From`, explicitly.** `SIPUserAgent.Call(dst, username,
+  password, mediaSession, ringTimeout)` — the simple string-destination overload — builds its own
+  `SIPCallDescriptor` without setting `From`, which leaves the trunk to infer a caller ID from the SIP
+  registration username. That is not a phone number, and Telnyx rejects it outright with
+  `403 Caller Origination Number is Invalid` before the call ever rings - a clean, immediate failure, not
+  a NAT-style silent one. Build the `SIPCallDescriptor` yourself and set `From` to `Telephony:DidNumber`
+  (see `TelephonyBackgroundService.BridgeToMobileAsync`) for any outbound leg. This one was found by
+  reflecting the installed package's actual field list rather than trusting the XML docs' summaries -
+  another instance of "reading the source beats guessing" above.
 - **NAT: `Telephony:PublicHost` is mandatory when running behind a router.** SIPSorcery substitutes the
   *local* address into the REGISTER `Contact` (see `SIPTransport.ContactHost`), so without it the trunk is
   told to reach us at a LAN address and inbound INVITEs never arrive — the caller hears a busy/failure tone
@@ -250,13 +269,15 @@ stage and copies them into the API's `wwwroot`. One container, one port, one ori
 - **Only one instance may hold the trunk registration.** The provider keeps the most recent binding, so a
   second instance on the same credential silently steals inbound calls. Stop the old one before deploying.
 - **Legal: recording consent varies by jurisdiction**, and several require *all* parties to consent rather
-  than one. The disclosure approach is an open decision for the operator — never silently drop or
-  "simplify away" disclosure prompts or tones once they exist, and never assume one jurisdiction's rules.
-  Specific to the Outbound path: `recording-notice.wav` reaches **only the operator**. The third party is
-  merged in by the handset and CallTree is never told, so no prompt can ever reach them —
-  `Telephony:RecordingToneIntervalSeconds` is the only disclosure available to that party, and it is off
-  by default. Say so plainly whenever this path is discussed; it is a property of the design, not a bug
-  to be quietly fixed, and an operator who assumes the notice is heard by everyone is exposed.
+  than one. The disclosure approach was an open decision for the operator; it is now decided (spoken
+  notice on each path, tone off — see Status) but the rule stands regardless of what gets decided: never
+  silently drop or "simplify away" disclosure prompts or tones once they exist, and never assume one
+  jurisdiction's rules apply universally. Specific to the Outbound path: `recording-notice.wav` reaches
+  **only the operator**. The third party is merged in by the handset and CallTree is never told, so no
+  prompt can ever reach them — `Telephony:RecordingToneIntervalSeconds` is the only disclosure available
+  to that party, and it has been left off by operator decision, not just its default. Say so plainly
+  whenever this path is discussed; it is a property of the design, not a bug to be quietly fixed, and an
+  operator who assumes the notice is heard by everyone is exposed.
 
 ## Testing philosophy
 

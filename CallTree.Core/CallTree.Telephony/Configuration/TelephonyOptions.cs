@@ -54,6 +54,12 @@ public sealed record TelephonyOptions
     public int ScreeningTimeoutSeconds { get; init; } = 12;
 
     /// <summary>
+    /// How long to let the outbound leg to <see cref="MyCellNumber"/> ring before giving up and telling
+    /// the caller nobody picked up. Read per dial attempt, like <see cref="ScreeningTimeoutSeconds"/>.
+    /// </summary>
+    public int DialTimeoutSeconds { get; init; } = 25;
+
+    /// <summary>
     /// Optional PIN the Outbound (my cell) path must key in before it is answered and recorded. Blank
     /// means caller ID alone is enough.
     /// </summary>

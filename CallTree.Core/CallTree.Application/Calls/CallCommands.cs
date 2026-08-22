@@ -29,6 +29,14 @@ public sealed record AnswerCall(Guid CallId, DateTimeOffset When, bool RequireSc
 public sealed record PassScreening(Guid CallId, DateTimeOffset When)
     : CallCommand(CallId, When);
 
+/// <summary>The Inbound caller passed the IVR gate; an outbound leg to the configured mobile is being placed.</summary>
+public sealed record BeginDialing(Guid CallId, DateTimeOffset When, PhoneNumber Target, string SipCallId)
+    : CallCommand(CallId, When);
+
+/// <summary>The outbound leg to the mobile answered; both legs are now bridged.</summary>
+public sealed record BridgeCall(Guid CallId, DateTimeOffset When)
+    : CallCommand(CallId, When);
+
 /// <summary>Recording has started; the file exists and is being written.</summary>
 public sealed record StartRecording(Guid CallId, DateTimeOffset When, string RelativePath, ChannelLayout ChannelLayout)
     : CallCommand(CallId, When);

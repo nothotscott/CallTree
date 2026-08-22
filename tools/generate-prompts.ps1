@@ -34,20 +34,26 @@ $prompts = [ordered]@{
     # which CallTree is never told about. Telling them is the operator's job, hence the reminder.
     "recording-notice" = "Recording has started. Please tell anyone you add to this call that it is being recorded."
     "pin-request"      = "Please enter your PIN, followed by the pound key."
+    apology            = "Sorry, we were unable to reach anyone. Goodbye."
 }
 
 # Not speech: a periodic tone is the only disclosure the outbound path can make to a party who is merged
 # in later. 1400 Hz is the tone long associated with recorded lines. Off unless an interval is configured.
+#
+# "ringing" is the ~2s "on" portion of the North American ringback cadence (440+480 Hz, 2s on / 4s off);
+# TelephonyBackgroundService.PlayRingingAsync loops it with a 4s gap rather than baking the gap into the
+# file, the same split WaitForHangupAsync already uses for recording-tone's interval.
 $tones = [ordered]@{
     "recording-tone" = @{ Frequency = 1400; Seconds = 0.4 }
+    "ringing"        = @{ Frequency = 440; Frequency2 = 480; Seconds = 2.0 }
 }
 
 <#
-  Writes an 8 kHz / 16-bit / mono PCM WAV holding a single tone, with a short fade at each end so it
-  starts and stops without a click.
+  Writes an 8 kHz / 16-bit / mono PCM WAV holding a tone (or two mixed together), with a short fade at
+  each end so it starts and stops without a click.
 #>
 function Write-ToneWav {
-    param([string]$Path, [double]$Frequency, [double]$Seconds)
+    param([string]$Path, [double]$Frequency, [double]$Seconds, [double]$Frequency2 = 0)
 
     $rate = 8000
     $count = [int]($rate * $Seconds)
@@ -58,7 +64,11 @@ function Write-ToneWav {
         $gain = 1.0
         if ($i -lt $fade) { $gain = $i / $fade }
         elseif ($i -ge ($count - $fade)) { $gain = ($count - 1 - $i) / $fade }
-        $value = [math]::Sin(2 * [math]::PI * $Frequency * $i / $rate) * 12000 * $gain
+        $tone = [math]::Sin(2 * [math]::PI * $Frequency * $i / $rate)
+        if ($Frequency2 -gt 0) {
+            $tone = ($tone + [math]::Sin(2 * [math]::PI * $Frequency2 * $i / $rate)) / 2
+        }
+        $value = $tone * 12000 * $gain
         $samples[$i] = [int16][math]::Round($value)
     }
 
@@ -123,11 +133,13 @@ try {
         if ($Only.Count -gt 0 -and $Only -notcontains $name) { continue }
 
         $tone = $tones[$name]
+        $freq2 = if ($tone.Contains('Frequency2')) { $tone.Frequency2 } else { 0 }
         $path = Join-Path $OutputDirectory "$name.wav"
-        Write-ToneWav -Path $path -Frequency $tone.Frequency -Seconds $tone.Seconds
+        Write-ToneWav -Path $path -Frequency $tone.Frequency -Seconds $tone.Seconds -Frequency2 $freq2
 
         $size = (Get-Item $path).Length
-        Write-Host ("  {0,-17} {1,6:N1}s  {2,7:N0} bytes  {3} Hz tone" -f $name, $tone.Seconds, $size, $tone.Frequency)
+        $freqLabel = if ($freq2 -gt 0) { "$($tone.Frequency)+$freq2 Hz" } else { "$($tone.Frequency) Hz" }
+        Write-Host ("  {0,-17} {1,6:N1}s  {2,7:N0} bytes  {3} tone" -f $name, $tone.Seconds, $size, $freqLabel)
     }
 }
 finally {

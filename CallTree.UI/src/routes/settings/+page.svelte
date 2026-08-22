@@ -271,6 +271,15 @@
 						/>
 						{@render notes('Telephony:ScreeningTimeoutSeconds', 'How long to wait for that key.')}
 					</label>
+
+					<label class="block text-sm">
+						<span class="font-medium text-slate-700">Dial timeout (seconds)</span>
+						<input type="number" bind:value={telephony.dialTimeoutSeconds} class={inputClass} />
+						{@render notes(
+							'Telephony:DialTimeoutSeconds',
+							'How long to let your mobile ring before giving up and telling the caller nobody answered.'
+						)}
+					</label>
 				</div>
 
 				<label class="flex items-start gap-2 text-sm">

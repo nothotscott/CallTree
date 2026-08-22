@@ -44,6 +44,10 @@ public sealed record TelephonySettings
     [Range(1, 300)]
     public int ScreeningTimeoutSeconds { get; init; } = 12;
 
+    /// <summary>How long the outbound leg to the mobile is allowed to ring before it counts as a miss.</summary>
+    [Range(1, 120)]
+    public int DialTimeoutSeconds { get; init; } = 25;
+
     /// <summary>Reordering window for received RTP before it is written to a recording.</summary>
     [Range(0, 1000)]
     public int JitterBufferMilliseconds { get; init; } = 60;

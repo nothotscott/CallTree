@@ -79,15 +79,14 @@ end to end.
 - **Verified locally** with a scripted caller sending real RFC 4733 DTMF: PCMU negotiated, non-silent RTP
   received (so the prompt genuinely streamed), and all three outcomes landing correctly in SQLite.
 
-## Phase 3 — Recording calls from my own number ⚠️ (built and unit-tested, not yet validated by phone)
+## Phase 3 — Recording calls from my own number ✅ (validated by phone)
 
 Calls classified `Outbound` are answered, optionally gated by a PIN, and recorded to a mono 16-bit WAV.
 Only received audio is captured, which is the whole design: the operator adds the other party with the
 handset's own three-way merge, so by the time it matters this single leg already carries both voices.
 
-**Not yet validated over the trunk.** The unit tests feed `CallRecorder` packets directly; the seam that
-has never run is the one in between — SIPSorcery's `OnRtpPacketReceived` delivering real PCMU. Until a
-real call has been placed and the file played back, this phase is not finished.
+**Validated over the trunk**: the notice played, the PIN gate worked, and the recorded `.wav` played back
+correctly at the right length.
 
 ### The RTP timestamp is the clock
 
@@ -137,8 +136,10 @@ the case that genuinely needs the shared wall clock this phase did without.
 ### The PIN, and what Screening now means
 
 `Telephony:OutboundPin` gates the recording path, blank by default. Caller ID is trivially forged, and
-this is the path that answers automatically and records without asking; today that costs disk, but once
-Phase 4 can place an outbound leg the same forgery costs money.
+this is the path that answers automatically and records without asking; a successful spoof here costs disk
+and nothing else, since this path never dials anywhere itself. Worth deciding regardless, now that Phase 4
+means the codebase does place real outbound calls elsewhere and a forged identity is worth taking
+seriously project-wide.
 
 `Call.Answer` now takes `requireScreening` rather than deriving it from `Source`, so `Screening` means
 "this caller is being gated" on either path. That is what lets a failed PIN land in `ScreenedOut` — a
@@ -159,9 +160,11 @@ CallTree is never told it happened. No prompt can reach them.
 
 The only mechanical disclosure available on this path is a periodic tone, added as
 `Telephony:RecordingToneIntervalSeconds` (a generated 1400 Hz tone, sent not received, so it does not
-appear in the recording). It is **off by default**, because the wording, the interval and whether
-one-party consent is even sufficient are legal decisions for the operator — see TODO.md. What is built
-is the mechanism, not the answer.
+appear in the recording). **Decided (2026-08-22): left off.** The operator confirmed the spoken notice on
+each path (`greeting.wav` Inbound, `recording-notice.wav` Outbound) plays correctly on real calls and is
+the chosen disclosure; the tone is not turned on. The structural gap above is unchanged by that decision —
+it is a property of the design (the handset merge is invisible to CallTree), not something the tone would
+have closed for the merged-in party anyway once it was declined.
 
 ### Elsewhere
 
@@ -175,6 +178,116 @@ is the mechanism, not the answer.
 - `PromptPlayer` was extracted from `ScreeningGate` before `PinGate` copied it a second time.
 - The settings page grew a Recording section. The PIN is write-only like the trunk password, with a
   switch beside it, because "blank means unchanged" leaves no way to express "turn the gate off".
+
+## Phase 4 + 5 — Inbound bridge and stereo recording ✅ (validated by phone)
+
+A screened-in Inbound caller is now bridged to `Telephony:MyCellNumber` and both legs are recorded to one
+stereo WAV, instead of the Phase 2 stand-in (`Call.CompleteScreening`, now deleted) that just ended the
+call once the gate was passed.
+
+**Validated over the trunk**: bridge connects with two-way audio, a caller hangup ends the mobile leg, a
+mobile hangup ends the caller leg, and an unanswered ring lands in `Missed` with the apology prompt heard
+— all four confirmed on real calls.
+
+### Bring-up fault: the outbound leg's caller ID
+
+Worth recording, in the same spirit as Phase 1's stacked faults — the first real dial attempt failed with
+`403 Caller Origination Number is Invalid` from Telnyx. `SIPUserAgent.Call(dst, username, password,
+mediaSession, ringTimeout)` — the simple overload used for the first cut — builds its own
+`SIPCallDescriptor` with no `From` set, which left the trunk to infer a caller ID from the SIP registration
+username rather than a phone number. Telnyx validates the calling number against what is actually
+provisioned on the account, so anything else is rejected before the call ever rings.
+
+Fixed by constructing the `SIPCallDescriptor` explicitly and pinning `From` to `Telephony:DidNumber`:
+
+```csharp
+var from = $"<sip:{did.Value.TrimStart('+')}@{server}>";
+var callDescriptor = new SIPCallDescriptor(
+    trunk.Username, trunk.Password, dst, from,
+    to: null, routeSet: null, customHeaders: null, authUsername: null,
+    callDirection: SIPCallDirection.Out, contentType: null, content: null, mangleIPAddress: null);
+```
+
+`BridgeToMobileAsync` now fails loudly with a clear log line if `Telephony:DidNumber` isn't configured,
+rather than dialing out with a caller ID the trunk will reject anyway. Confirmed via reflection against the
+installed 10.0.12 package (`SIPCallDescriptor`'s fields, not just its XML docs) before writing the fix,
+per the project's standing rule to verify SIPSorcery v10 signatures against the real package rather than
+older docs or memory.
+
+### Ringback while the outbound leg rings
+
+Phone testing surfaced a real gap: the caller heard dead silence for up to `Telephony:DialTimeoutSeconds`
+while the mobile rang. `PlayRingingAsync` loops `ringing.wav` (440+480 Hz, the North American ringback
+tone) to the caller for as long as the dial attempt is in flight, on its own linked cancellation token so
+it stops the instant the dial resolves — answered, failed, or abandoned — rather than racing
+`apology.wav` onto the same audio source. The prompt itself is the ~2s "on" portion; the 4s "off" gap is a
+plain `Task.Delay` in the loop, the same split `WaitForHangupAsync` already uses for
+`recording-tone`'s interval. `generate-prompts.ps1`'s tone generator grew a second-frequency parameter to
+produce it, since a single sine wave doesn't read as a phone ringing.
+
+### Scope: deliberately smaller than the original Phase 4 TODO
+
+Matching how Phases 1–3 were kept inline, this pass does **not** do the full refactor the TODO once
+described:
+
+- **No `CallSession`/`ActiveCallRegistry`.** The bridge for one call is a call-local method
+  (`TelephonyBackgroundService.BridgeToMobileAsync` / `RunBridgeAsync`), not a global registry. The
+  pre-existing limitation that the one long-lived `listenerUserAgent` can't cleanly handle two
+  *simultaneous inbound* INVITEs is untouched by this change — the bridge's outbound leg uses its own,
+  separate, per-call `SIPUserAgent`, so it neither worsens nor fixes that.
+- **No DTMF passthrough** from the caller to the mobile leg during the bridge — RFC 4733 (payload 101) is
+  dropped at the relay, same as it always was at the recorder.
+- **No trunk concurrency/duration-cap check** — that's a provider-account setting to verify, not code.
+
+### The bridge itself
+
+- `Call.BeginDialing` / `Call.Bridge` / `Call.MarkMissed` — already written in the Phase 2 domain model,
+  unused until now — drive `Dialing` and the eventual `InProgress`/`Missed` outcome. Two new
+  `CallCommand`s, `BeginDialing` and `BridgeCall`, carry those transitions through `ICallCommands` the
+  same way every other telephony event does.
+- The outbound leg is a fresh `SIPUserAgent` placing an explicit `SIPCallDescriptor` (see the caller-ID
+  fault below — this is not the simple string-destination overload) against the trunk — the same registrar
+  the DID is registered through, since that is what actually routes a PSTN destination. The outbound leg's
+  SIP Call-ID persisted on `BeginDialing` is a locally-generated correlation id, not the real one
+  SIPSorcery mints internally when the INVITE is sent — that value isn't surfaced by the public API before
+  the call resolves. Left as-is: the persisted id is only ever used for our own forensic correlation
+  (matching a `CallLeg` row to a `Telephony:TraceSip` capture by hand), never compared against the wire
+  Call-ID programmatically, so the mismatch costs nothing functionally.
+- If the caller hangs up while the mobile is still ringing, the dial attempt is raced against the same
+  hangup-cancellation token the inbound leg already used for the screening gate, and the outbound agent is
+  hung up rather than left ringing.
+- Once both legs are up, RTP is relayed raw each direction with `SendRtpRaw` — no transcode, since both
+  legs are always PCMU. Whichever side hangs up first ends the call exactly once (the existing
+  `Interlocked.Exchange`-guarded `EndOnceAsync`) and explicitly hangs up the other leg, so a caller hangup
+  can't leave the mobile leg connected and vice versa.
+- No answer within `Telephony:DialTimeoutSeconds` (default 25s, live-reloaded like
+  `ScreeningTimeoutSeconds`) plays a new `apology.wav` to the caller and ends the call `Missed`.
+
+### `BridgedCallRecorder`
+
+`CallRecorder` (Phase 3) could not be reused: its file position is driven by one leg's own RTP timestamp,
+and a bridge has two legs with two unrelated RTP clocks and nothing to align them to. `BridgedCallRecorder`
+gives each leg its own reorder buffer and silence-fill (identical rules to `CallRecorder` — a gap is
+filled, a jump over ten seconds is a discontinuity and resynchronises instead of filling), but each leg
+accumulates decoded samples into its own queue rather than writing straight to the WAV. The *shared wall
+clock* is wherever packet arrival on **either** leg drives a drain of both queues together, not either
+leg's RTP clock directly — a leg with nothing queued at drain time is still understood to be advancing in
+real time, because its own silence-fill keeps its queue topped up during a gap on that leg alone. At
+`Close()`, whichever leg still has a residual tail is padded with silence rather than truncated, since a
+stereo WAV cannot have mismatched channel lengths. Left channel is the caller, right is the mobile,
+matching `ChannelLayout.StereoPerLeg`'s existing doc comment. The header is re-patched every five seconds
+like `CallRecorder`'s, for the same reason: a process killed mid-bridge should still leave a file that
+plays up to the last flush.
+
+### Elsewhere
+
+- `Call.CompleteScreening` is deleted — it was explicitly the Phase 2 stand-in, documented as due for
+  removal once bridging landed.
+- `CallLifecycleService.ScreeningCompletedAsync` now only ever records a *failed* gate; a pass never
+  reaches it — throwing if it is ever called with `Passed` catches that invariant breaking rather than
+  silently completing a call that should have been bridged.
+- `Telephony:DialTimeoutSeconds` is wired through the same settings stack as every other numeric Telephony
+  setting (options, the settings DTOs, the config-file merge, the `/settings` UI field).
 
 ## Cross-cutting work
 
@@ -353,6 +466,10 @@ yet — there is no API to read from until Phase 7.
 - Phase 0: validated (build, tests, boot, migration, `/health`).
 - Phase 1: validated end to end over a real trunk.
 - Phase 2: validated by phone — prompt audible, DTMF detected, all three outcomes persisted correctly.
+- Phase 3: validated by phone — notice played, PIN gate worked, recording played back correctly.
+- Phase 4 + 5 (inbound bridge, stereo recording): validated by phone — bridge connects with two-way audio,
+  hangup from either side ends the call cleanly, an unanswered ring lands in `Missed` with the apology
+  prompt, and the resulting stereo recording plays back with both sides on their correct channel.
 - Configuration layering, hot reload, the password merge rules and the restart-required reporting:
   verified against a running instance, not just unit-tested.
-- Unit tests: 81 passing.
+- Unit tests: 125 passing.

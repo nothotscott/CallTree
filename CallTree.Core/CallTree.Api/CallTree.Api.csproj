@@ -5,6 +5,7 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <UserSecretsId>6d205c5f-1b8f-430e-8396-d520145654cf</UserSecretsId>
+    <ApplicationIcon>CallTree.ico</ApplicationIcon>
   </PropertyGroup>
 
   <ItemGroup>
@@ -26,6 +27,10 @@
   <ItemGroup>
     <!-- PromptLibrary resolves these against the content root, which is the output directory once published. -->
     <Content Include="prompts\**\*.wav" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Content Include="CallTree.ico" />
   </ItemGroup>
 
   <!--

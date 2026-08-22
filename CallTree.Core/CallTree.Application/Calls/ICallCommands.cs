@@ -51,6 +51,15 @@ public sealed class ScopedCallCommands(IServiceScopeFactory scopeFactory) : ICal
                 await lifecycle.PassScreeningAsync(passed.CallId, passed.When, cancellationToken);
                 break;
 
+            case BeginDialing dialing:
+                await lifecycle.BeginDialingAsync(
+                    dialing.CallId, dialing.Target, dialing.SipCallId, dialing.When, cancellationToken);
+                break;
+
+            case BridgeCall bridge:
+                await lifecycle.BridgeAsync(bridge.CallId, bridge.When, cancellationToken);
+                break;
+
             case StartRecording start:
                 await lifecycle.StartRecordingAsync(
                     start.CallId, start.RelativePath, start.ChannelLayout, start.When, cancellationToken);

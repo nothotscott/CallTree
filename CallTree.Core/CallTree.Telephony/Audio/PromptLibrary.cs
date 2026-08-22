@@ -32,6 +32,15 @@ public static class PromptNames
     /// this is audible to anyone merged into the call later.
     /// </summary>
     public const string RecordingTone = "recording-tone";
+
+    /// <summary>Played to an Inbound caller whose bridge to the mobile went unanswered, before hanging up.</summary>
+    public const string Apology = "apology";
+
+    /// <summary>
+    /// A ringback tone looped to an Inbound caller while the bridge's outbound leg is ringing, so they
+    /// don't sit in dead silence waiting for the mobile to answer.
+    /// </summary>
+    public const string Ringing = "ringing";
 }
 
 /// <summary>

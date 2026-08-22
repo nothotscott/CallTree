@@ -11,6 +11,7 @@ namespace CallTree.Domain.Calls;
 ///   Ringing → InProgress                        (Outbound source: answer = start talking)
 ///   Ringing → Screening → InProgress            (Outbound source with a PIN configured)
 ///   Ringing → Screening → Dialing → InProgress  (Inbound source: IVR gate, then bridge to cell)
+///   Dialing → Missed                            (bridge leg never answered)
 ///   Terminal: Completed, ScreenedOut, Missed, Failed
 ///
 /// Screening means "this caller is being gated", whichever path they are on — which is what lets a
@@ -145,17 +146,6 @@ public class Call : AggregateRoot
     public void Complete(DateTimeOffset when, string? reason = null)
     {
         EnsureStatus(CallStatus.InProgress);
-        End(CallStatus.Completed, when, reason);
-    }
-
-    /// <summary>
-    /// Caller passed the IVR gate, but there is nothing to connect them to yet.
-    /// Phase 2 only: Phase 4 replaces this with <see cref="BeginDialing"/> followed by
-    /// <see cref="Bridge"/>, and this method should be deleted once bridging lands.
-    /// </summary>
-    public void CompleteScreening(DateTimeOffset when, string reason)
-    {
-        EnsureStatus(CallStatus.Screening);
         End(CallStatus.Completed, when, reason);
     }
 

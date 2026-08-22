@@ -8,11 +8,12 @@ recording are implemented directly against [SIPSorcery](https://github.com/sipso
 makes it a practical way to actually learn SIP and RTP rather than configure someone else's dial plan. If
 you want a fully featured PBX, use a fully featured PBX.
 
-> **Status: in development.** Phases 0–2 are complete and validated over a real trunk — registration,
-> inbound signalling, prompt playback and the DTMF screening gate all work. Phase 3, recording calls from
-> your own number, is written and unit-tested but has not yet been validated over the trunk. Bridging
-> (Phase 4) is not implemented. The SvelteKit web UI has a call log, a status page and a settings page.
-> See [PROGRESS.md](PROGRESS.md) and [TODO.md](TODO.md).
+> **Status: in development.** Phases 0–5 are complete and validated over a real trunk — registration,
+> inbound signalling, prompt playback, the DTMF screening gate, recording calls from your own number, and
+> bridging an inbound caller to your mobile with both sides recorded all work, including a ringback tone
+> while your phone rings and a clean hangup from either side. The SvelteKit web UI has a call log, a
+> recordings browser with playback, a status page and a settings page. See [PROGRESS.md](PROGRESS.md) and
+> [TODO.md](TODO.md).
 
 ## How it works
 
@@ -87,8 +88,8 @@ Settings come from three layers, each overriding the one above it:
 Most settings are read once, when the sockets are bound and the trunk registration is established:
 changing them saves fine but needs a restart, and the settings page lists exactly which ones are
 waiting. Everything read per call applies immediately — `MyCellNumber`, `DidNumber`, `ScreeningDigit`,
-`ScreeningTimeoutSeconds`, `OutboundPin`, `JitterBufferMilliseconds`, `RecordingToneIntervalSeconds` and
-`TraceSip`.
+`ScreeningTimeoutSeconds`, `DialTimeoutSeconds`, `OutboundPin`, `JitterBufferMilliseconds`,
+`RecordingToneIntervalSeconds` and `TraceSip`.
 
 `config.json` holds the trunk password and the outbound PIN in plain text — necessary if the UI is to set
 them. It is written owner-only where the platform supports it; treat it like the recordings.
@@ -106,6 +107,7 @@ them. It is written owner-only where the platform supports it; treat it like the
 | `Telephony:RtpPortStart` / `RtpPortEnd` | `10000` / `10100` | RTP range; must match your port forward |
 | `Telephony:ScreeningDigit` | `1` | Digit an inbound caller must press |
 | `Telephony:ScreeningTimeoutSeconds` | `12` | How long they have to press it. Also the PIN deadline |
+| `Telephony:DialTimeoutSeconds` | `25` | How long to let your mobile ring before giving up and telling the caller nobody answered |
 | `Telephony:OutboundPin` | — | PIN required before a call from your own number is answered and recorded. Blank means caller ID alone decides, and caller ID is spoofable |
 | `Telephony:JitterBufferMilliseconds` | `60` | How long received audio is held so out-of-order RTP can be reordered before it is written |
 | `Telephony:RecordingToneIntervalSeconds` | `0` | Seconds between recording-notice tones; `0` for none. The only notice a merged-in third party hears — see [Recording consent](#recording-consent--read-this) |
@@ -154,6 +156,8 @@ Prompts live in `CallTree.Api/prompts/` as ordinary `.wav` files, loaded once at
 | `recording-notice.wav` | To *you*, on a call from your own number, just before recording starts |
 | `pin-request.wav` | Asks for `Telephony:OutboundPin`. Only used when one is configured |
 | `recording-tone.wav` | The periodic tone, when `Telephony:RecordingToneIntervalSeconds` is non-zero |
+| `apology.wav` | To an Inbound caller whose bridge to your mobile went unanswered, before hanging up |
+| `ringing.wav` | Looped to an Inbound caller while your mobile rings, so they aren't in dead silence |
 
 They are a content directory rather than embedded resources specifically so the wording can change without
 a rebuild. The ones in the repository are synthesised placeholders; regenerate them, or edit the text
@@ -181,6 +185,13 @@ a mono 16-bit WAV under `Storage:RecordingsRoot`, grouped by month and named for
 Only *received* audio is captured — which is the whole point of the design. You add the other party with
 your phone's own three-way merge, so by the time it matters this single leg already carries both voices
 mixed together, and CallTree needs no second leg and no mixing to record a two-party conversation.
+
+A screened-in inbound call works differently: there really are two legs (the caller, and the bridge to
+your mobile), so it is recorded to a **stereo** WAV instead — left channel the caller, right channel your
+mobile. The two legs have unrelated RTP clocks with nothing to align them to, so this file is driven by a
+shared wall clock rather than either leg's own RTP timestamp: each leg gets its own reordering and
+silence-fill, and whichever leg's audio arrives drains both channels together, keeping them in step even
+if one leg goes quiet for a moment.
 
 The **RTP timestamp drives the file**, not a wall clock. For PCMU that timestamp counts samples at 8 kHz,
 so it says exactly where each packet belongs; writing packets back to back as they arrive would quietly
@@ -231,9 +242,10 @@ Two mitigations, and you want both:
 
 Separately, **`Telephony:OutboundPin`** guards the recording path. Without it, the only thing between a
 stranger and a call that is answered automatically and recorded is a caller ID match, and caller ID is
-trivially forged. Today the worst that buys an attacker is a junk recording and some disk; once Phase 4
-can place an outbound leg, the same forgery is what turns a probe into a phone bill. It is blank by
-default so that bringing the recording path up does not require deciding this first — but decide it.
+trivially forged — the worst that buys an attacker on this specific path is a junk recording and some
+disk, since it never dials anywhere itself. It is blank by default so that bringing the recording path up
+did not require deciding this first — but decide it, especially now that Phase 4 means this codebase does
+place real outbound calls elsewhere, and a forged identity is worth taking seriously project-wide.
 
 Also disable SIP ALG on your router if it has one; it rewrites SIP messages in flight and causes one-way
 audio that is very hard to diagnose.

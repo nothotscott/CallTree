@@ -17,6 +17,7 @@ export interface TelephonySettings {
 	traceSip: boolean;
 	screeningDigit: number;
 	screeningTimeoutSeconds: number;
+	dialTimeoutSeconds: number;
 	jitterBufferMilliseconds: number;
 	recordingToneIntervalSeconds: number;
 }

@@ -44,6 +44,27 @@ public class CallLifecycleService(ICallRepository repository)
         await repository.SaveChangesAsync(cancellationToken);
     }
 
+    /// <summary>The Inbound caller passed the IVR gate; an outbound leg to the mobile is being placed.</summary>
+    public async Task BeginDialingAsync(
+        Guid callId,
+        PhoneNumber target,
+        string sipCallId,
+        DateTimeOffset when,
+        CancellationToken cancellationToken = default)
+    {
+        var call = await GetRequiredAsync(callId, cancellationToken);
+        call.BeginDialing(target, sipCallId, when);
+        await repository.SaveChangesAsync(cancellationToken);
+    }
+
+    /// <summary>The outbound leg to the mobile answered; both legs are now bridged.</summary>
+    public async Task BridgeAsync(Guid callId, DateTimeOffset when, CancellationToken cancellationToken = default)
+    {
+        var call = await GetRequiredAsync(callId, cancellationToken);
+        call.Bridge(when);
+        await repository.SaveChangesAsync(cancellationToken);
+    }
+
     public async Task StartRecordingAsync(
         Guid callId,
         string relativePath,
@@ -73,8 +94,8 @@ public class CallLifecycleService(ICallRepository repository)
     }
 
     /// <summary>
-    /// Records the outcome of the IVR screening gate. Phase 2 ends the call either way; Phase 4 will
-    /// replace the <see cref="ScreeningOutcome.Passed"/> branch with dialing the cell and bridging.
+    /// Records a failed IVR screening gate (wrong digit or timeout) and ends the call. A pass never
+    /// reaches here — it goes to <see cref="BeginDialingAsync"/> instead, since there is a bridge to place.
     /// </summary>
     public async Task ScreeningCompletedAsync(
         Guid callId,
@@ -83,6 +104,12 @@ public class CallLifecycleService(ICallRepository repository)
         string reason,
         CancellationToken cancellationToken = default)
     {
+        if (outcome == ScreeningOutcome.Passed)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(outcome), "A passed screening bridges the call instead of ending it - use BeginDialingAsync.");
+        }
+
         var call = await GetRequiredAsync(callId, cancellationToken);
         if (call.IsTerminal)
         {
@@ -94,14 +121,7 @@ public class CallLifecycleService(ICallRepository repository)
             leg.End(when, HangupInitiator.Local);
         }
 
-        if (outcome == ScreeningOutcome.Passed)
-        {
-            call.CompleteScreening(when, reason);
-        }
-        else
-        {
-            call.ScreenOut(when, reason);
-        }
+        call.ScreenOut(when, reason);
 
         await repository.SaveChangesAsync(cancellationToken);
     }
