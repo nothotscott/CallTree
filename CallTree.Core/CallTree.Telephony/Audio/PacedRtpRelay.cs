@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using Microsoft.Extensions.Logging;
 using SIPSorcery.Net;
 using SIPSorceryMedia.Abstractions;
@@ -32,6 +33,10 @@ internal sealed class PacedRtpRelay : IAsyncDisposable
     private readonly Lock _gate = new();
     private readonly PeriodicTimer _timer = new(FrameInterval);
     private readonly Task _pump;
+    private readonly long _startedTicks = Stopwatch.GetTimestamp();
+
+    private long _framesSent;
+    private long _idleTicks;
 
     /// <param name="direction">A short label for log lines, e.g. "caller-&gt;mobile" - purely diagnostic.</param>
     public PacedRtpRelay(
@@ -78,12 +83,14 @@ internal sealed class PacedRtpRelay : IAsyncDisposable
 
             if (!has)
             {
+                _idleTicks++;
                 continue;
             }
 
             try
             {
                 _destination.SendRtpRaw(SDPMediaTypesEnum.audio, frame.Payload, frame.Timestamp, 0, G711.PcmuPayloadType);
+                _framesSent++;
             }
             catch (Exception ex)
             {
@@ -103,5 +110,27 @@ internal sealed class PacedRtpRelay : IAsyncDisposable
     {
         _timer.Dispose();
         await _pump;
+
+        // A relay that is keeping up sends one frame per 20 ms of call, so the rate below should sit at
+        // roughly 50/s and the queue should be near empty. A rate materially under 50/s means the pump
+        // could not keep pace with arrival, and "still queued" is then the backlog that shortfall built
+        // up - 50 frames is a second of accumulated one-way delay the far end hears as lag.
+        var elapsed = Stopwatch.GetElapsedTime(_startedTicks);
+        int queued;
+        lock (_gate)
+        {
+            queued = _buffer.Count;
+        }
+
+        _logger.LogInformation(
+            "Call {CallId}: paced relay ({Direction}) sent {Sent} frames in {Elapsed:0.0}s ({Rate:0.0}/s), "
+            + "{IdleTicks} idle ticks, {Queued} still queued",
+            _callId,
+            _direction,
+            _framesSent,
+            elapsed.TotalSeconds,
+            elapsed.TotalSeconds > 0 ? _framesSent / elapsed.TotalSeconds : 0,
+            _idleTicks,
+            queued);
     }
 }

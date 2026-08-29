@@ -711,6 +711,12 @@ public class TelephonyBackgroundService(
 
             recorder.AttachSecondaryLeg();
 
+            // Both legs are about to be driven directly by a relay - see
+            // PromptPlayer.SuspendBackgroundSilence for why their own silence generators cannot keep
+            // running alongside one. The notice above has already finished playing, so nothing is cut off.
+            primaryPlayer.SuspendBackgroundSilence();
+            proxyPlayer.SuspendBackgroundSilence();
+
             // Paced, not just reordered - see PacedRtpRelay's remarks for why sending a packet the instant
             // it arrives is still choppy (with gradually increasing lag) even after reordering alone.
             var jitterDepth = TimeSpan.FromMilliseconds(telephonyOptions.CurrentValue.JitterBufferMilliseconds);
@@ -772,6 +778,11 @@ public class TelephonyBackgroundService(
         }
         finally
         {
+            // Unlike the bridge, the operator's own call carries on after this segment, so the primary leg
+            // gets its silence back: it is what keeps RTP flowing on that leg between proxy dials, and
+            // the recording tone needs a live source. The proxy leg stays suspended - it is closed next.
+            primaryPlayer.ResumeBackgroundSilence();
+
             await proxyAudio.CloseAudio();
             if (proxyAgent.IsCallActive)
             {
@@ -983,7 +994,12 @@ public class TelephonyBackgroundService(
             await calls.ExecuteAsync(new BridgeCall(callId, DateTimeOffset.UtcNow), cancellationToken);
             _logger.LogInformation("Call {CallId}: bridged to {Destination}", callId, result.Destination);
 
-            await RunBridgeAsync(callId, inboundMedia, outboundMedia, cancellationToken);
+            // The mobile leg needs an owner for its audio source too. Nothing is played to the mobile
+            // today - this exists so RunBridgeAsync can stop that leg's background silence the same way
+            // it stops the caller's, and is the natural home for any future prompt to the mobile.
+            var outboundPlayer = new PromptPlayer(outboundAudio, prompts, () => outboundAgent.IsCallActive);
+
+            await RunBridgeAsync(callId, inboundMedia, inboundPlayer, outboundMedia, outboundPlayer, cancellationToken);
         }
         finally
         {
@@ -1002,11 +1018,20 @@ public class TelephonyBackgroundService(
     private async Task RunBridgeAsync(
         Guid callId,
         NatAwareVoIPMediaSession inboundMedia,
+        PromptPlayer inboundPlayer,
         NatAwareVoIPMediaSession outboundMedia,
+        PromptPlayer outboundPlayer,
         CancellationToken cancellationToken)
     {
         var telephony = telephonyOptions.CurrentValue;
         var jitterDepth = TimeSpan.FromMilliseconds(telephony.JitterBufferMilliseconds);
+
+        // Both legs are about to be driven directly by a relay, so each leg's own background silence has
+        // to stop first - two senders sharing one SSRC is the bug PromptPlayer.SuspendBackgroundSilence
+        // describes. Deliberately not resumed: this method only returns once the call is over, and both
+        // audio sources are closed by the callers immediately afterwards.
+        inboundPlayer.SuspendBackgroundSilence();
+        outboundPlayer.SuspendBackgroundSilence();
 
         // Paced, not just reordered: see PacedRtpRelay's remarks for why sending a packet the instant it
         // arrives was still choppy (with gradually increasing lag) even after reordering fixed correctness.
