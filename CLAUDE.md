@@ -61,7 +61,9 @@ the caller enters — a spoofed caller ID
 that gets past a missing PIN is an open outbound dialer at the trunk's expense, not just a junk recording.
 
 A recordings browser (`/recordings`, `/recordings/{id}` with playback) is built on top of Phase 7's REST
-API and already ships in the frontend.
+API and already ships in the frontend. Recordings carry an editable **`Name`** — defaulted from the
+caller and the recording date by `RecordingName`, renamed through `PATCH /api/recordings/{id}`, and
+searchable from the list.
 
 **Workflow rule: one phase at a time.** The maintainer validates each telephony phase by phone before the
 next begins.
@@ -111,6 +113,12 @@ Dependency direction: `Api → {Telephony, Infrastructure} → Application → D
 - **Reads and writes use separate ports.** `ICallRepository` loads whole aggregates to mutate and save;
   `ICallQueries` returns flat, untracked read models (`CallSummary`) for display. API responses are read
   models, never the aggregate — exposing `Call` would freeze the transition surface into the HTTP contract.
+- **The one write that does not come from telephony is renaming a recording.** It arrives on an HTTP
+  request, which already has a DI scope, so it goes through `RecordingService` (Application) and
+  `ICallRepository.GetByRecordingIdAsync` rather than `ICallCommands`/`CallLifecycleService` — those
+  exist to turn SIP events into state transitions and carry scoping plumbing a controller does not need.
+  A recording's name is also the only mutable thing about it; every other field is a record of what the
+  telephony layer did.
 - Bridging (RTP payload relay) and recording (decoded PCM tap) are separate concerns — don't conflate.
 - **`Storage` is bound in `AddApplication`**, and `StorageOptions` lives in Application, because
   Infrastructure resolves the database directory from it while Telephony resolves the recordings root and

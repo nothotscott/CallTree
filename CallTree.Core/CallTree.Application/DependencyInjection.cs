@@ -10,6 +10,7 @@ public static class DependencyInjection
     public static IServiceCollection AddApplication(this IServiceCollection services, IConfiguration configuration)
     {
         services.AddScoped<CallLifecycleService>();
+        services.AddScoped<RecordingService>();
 
         // Singleton: it holds only the scope factory and opens a scope per command.
         services.AddSingleton<ICallCommands, ScopedCallCommands>();

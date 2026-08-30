@@ -66,6 +66,7 @@ public class CallTreeDbContext(DbContextOptions<CallTreeDbContext> options) : Db
             recording.Property(r => r.Id).ValueGeneratedNever();
             recording.Property(r => r.ChannelLayout).HasConversion<string>();
             recording.Property(r => r.FilePath).HasMaxLength(1024);
+            recording.Property(r => r.Name).HasMaxLength(RecordingName.MaxLength);
         });
     }
 }

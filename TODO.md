@@ -170,6 +170,11 @@ in full before touching `PacedRtpRelay`/`RunBridgeAsync`/`RunProxyDialAsync` aga
       file layered under the environment. The password is write-only.
 - [x] `GET /api/telephony/status` — trunk registration state, the registrar's failure message, the
       Contact it echoed back, the bound endpoints, and what is advertised in Contact and SDP.
+- [x] `PATCH /api/recordings/{id}` — rename a recording, plus a `search` filter on
+      `GET /api/recordings` matching a case-insensitive substring of the name. Every recording is born
+      with a name built from the caller and the recording date (`RecordingName`); rows predating the
+      column were backfilled by the `AddRecordingName` migration. Blank is rejected rather than taken as
+      "restore the default" — the caller and date it would be rebuilt from are fields of their own.
 - [ ] Remaining filters: date range, number, duration.
 - [ ] Call detail endpoint (`GET /api/calls/{id}`) exposing the legs, which the list summary flattens away.
 - [ ] Stream recordings with HTTP range support so playback can seek.
@@ -195,6 +200,10 @@ show.
 - [x] Telephony status at `/status`: registration state, the registrar's failure message and the binding
       it echoed back, plus warnings for the failures that otherwise present identically (no public host,
       no DID filter, missing prompts, settings waiting on a restart). Polls every 5 s.
+- [x] Name recordings from the UI: the detail page title *is* the name, edited in place the way Azure
+      DevOps edits a work-item title (Enter or Save commits, Escape puts back what was last saved, the
+      buttons appear only once it differs). The list gained a Name column beside Caller and a name
+      search whose state lives in the URL, same as the call log's filters.
 - [ ] Restart the service from the UI, so a trunk change does not need shell access. Needs care: the
       process supervises itself only under Compose's `restart: unless-stopped`, and there is no auth.
 - [ ] Live call state on the status page — there is no runtime call registry until Phase 4's

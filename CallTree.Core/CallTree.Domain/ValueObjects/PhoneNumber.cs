@@ -1,4 +1,5 @@
 using System.Diagnostics.CodeAnalysis;
+using System.Text.RegularExpressions;
 
 namespace CallTree.Domain.ValueObjects;
 
@@ -6,7 +7,7 @@ namespace CallTree.Domain.ValueObjects;
 /// A phone number normalized to E.164 (e.g. "+13055551234"). Bare 10-digit and
 /// 1-prefixed 11-digit inputs are assumed to be NANP numbers.
 /// </summary>
-public sealed record PhoneNumber
+public sealed partial record PhoneNumber
 {
     public string Value { get; }
 
@@ -46,5 +47,22 @@ public sealed record PhoneNumber
         return true;
     }
 
+    /// <summary>
+    /// NANP numbers grouped for readability ("+13055551234" -> "(305) 555-1234"); anything else is the
+    /// E.164 value unchanged. This feeds the stored default <c>RecordingName</c>, so it deliberately does
+    /// not depend on a viewer's locale. The frontend applies the same rule for display
+    /// (CallTree.UI/src/lib/format.ts).
+    /// </summary>
+    public string ToDisplayString()
+    {
+        var nanp = NanpPattern().Match(Value);
+        return nanp.Success
+            ? $"({nanp.Groups[1].Value}) {nanp.Groups[2].Value}-{nanp.Groups[3].Value}"
+            : Value;
+    }
+
     public override string ToString() => Value;
+
+    [GeneratedRegex(@"^\+1(\d{3})(\d{3})(\d{4})$")]
+    private static partial Regex NanpPattern();
 }

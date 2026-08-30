@@ -82,3 +82,42 @@ public class PagedResultTests
         Assert.True(result.HasPreviousPage);
     }
 }
+
+public class RecordingListQueryTests
+{
+    [Theory]
+    [InlineData(null, null)]
+    [InlineData("", null)]
+    [InlineData("   ", null)]
+    [InlineData("  landlord  ", "landlord")]
+    public void Create_trims_the_search_and_collapses_blank_to_no_filter(string? requested, string? expected)
+    {
+        Assert.Equal(expected, RecordingListQuery.Create(null, null, requested).Search);
+    }
+
+    [Fact]
+    public void Create_clamps_a_search_longer_than_any_name_could_be()
+    {
+        var search = RecordingListQuery.Create(null, null, new string('x', 5_000)).Search;
+
+        Assert.Equal(RecordingListQuery.MaxSearchLength, search!.Length);
+    }
+
+    [Theory]
+    [InlineData(null, 1)]
+    [InlineData(0, 1)]
+    [InlineData(7, 7)]
+    public void Create_clamps_page_to_at_least_one(int? requested, int expected)
+    {
+        Assert.Equal(expected, RecordingListQuery.Create(requested, null).Page);
+    }
+
+    [Theory]
+    [InlineData(null, RecordingListQuery.DefaultPageSize)]
+    [InlineData(0, 1)]
+    [InlineData(RecordingListQuery.MaxPageSize + 1, RecordingListQuery.MaxPageSize)]
+    public void Create_clamps_page_size_to_the_allowed_range(int? requested, int expected)
+    {
+        Assert.Equal(expected, RecordingListQuery.Create(null, requested).PageSize);
+    }
+}

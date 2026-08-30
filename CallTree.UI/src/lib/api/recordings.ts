@@ -5,9 +5,14 @@ import type { CallSource, PagedResult } from './calls';
 export const CHANNEL_LAYOUTS = ['Mono', 'StereoPerLeg'] as const;
 export type ChannelLayout = (typeof CHANNEL_LAYOUTS)[number];
 
+/** Matches RecordingName.MaxLength on the backend; the API rejects anything longer. */
+export const MAX_RECORDING_NAME_LENGTH = 200;
+
 export interface RecordingSummary {
 	id: string;
 	callId: string;
+	/** What the operator calls this recording. Never blank - the backend assigns a default. */
+	name: string;
 	callSource: CallSource;
 	/** E.164, or null when the caller ID would not parse. */
 	remoteNumber: string | null;
@@ -26,6 +31,8 @@ export const DEFAULT_PAGE_SIZE = 25;
 export interface RecordingListParams {
 	page?: number;
 	pageSize?: number;
+	/** Case-insensitive substring of the recording name; null or blank means no filter. */
+	search?: string | null;
 }
 
 export function buildRecordingListQuery(params: RecordingListParams): URLSearchParams {
@@ -34,6 +41,7 @@ export function buildRecordingListQuery(params: RecordingListParams): URLSearchP
 	if (params.pageSize && params.pageSize !== DEFAULT_PAGE_SIZE) {
 		search.set('pageSize', String(params.pageSize));
 	}
+	if (params.search) search.set('search', params.search);
 	return search;
 }
 
@@ -84,8 +92,41 @@ export function recordingAudioUrl(id: string): string {
 /** Reads list parameters out of a URL, ignoring anything that is not a value the API accepts. */
 export function parseRecordingListParams(url: URL): RecordingListParams {
 	const page = Number(url.searchParams.get('page'));
+	const search = url.searchParams.get('search')?.trim();
 
 	return {
-		page: Number.isFinite(page) && page > 1 ? Math.floor(page) : 1
+		page: Number.isFinite(page) && page > 1 ? Math.floor(page) : 1,
+		search: search ? search : null
 	};
+}
+
+/**
+ * Renames a recording and returns the updated row. The name is the only editable field a recording has;
+ * everything else on it is a record of what the telephony layer did.
+ *
+ * The API rejects a blank name and one past {@link MAX_RECORDING_NAME_LENGTH}, both as a ProblemDetails
+ * carrying a message against the field. That message is surfaced as it stands rather than restated here,
+ * so the rule lives in one place.
+ */
+export async function renameRecording(id: string, name: string): Promise<RecordingSummary> {
+	const response = await fetch(`/api/recordings/${id}`, {
+		method: 'PATCH',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify({ name })
+	});
+
+	if (response.ok) {
+		return response.json();
+	}
+
+	const problem = await response.json().catch(() => null);
+	const fieldErrors: Record<string, string[]> = problem?.errors ?? {};
+	const fieldMessage = Object.values(fieldErrors).flat()[0];
+
+	throw new Error(
+		fieldMessage ??
+			problem?.detail ??
+			problem?.title ??
+			`The API returned ${response.status} ${response.statusText}.`
+	);
 }

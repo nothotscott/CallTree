@@ -7,11 +7,28 @@ namespace CallTree.Infrastructure.Persistence;
 
 public class RecordingQueries(CallTreeDbContext dbContext) : IRecordingQueries
 {
+    private const string LikeEscape = "\\";
+
+    private static string Escape(string search) => search
+        .Replace(LikeEscape, LikeEscape + LikeEscape)
+        .Replace("%", LikeEscape + "%")
+        .Replace("_", LikeEscape + "_");
+
     public async Task<PagedResult<RecordingSummary>> ListAsync(
         RecordingListQuery query,
         CancellationToken cancellationToken = default)
     {
         var filtered = dbContext.Calls.AsNoTracking().Where(c => c.Recording != null);
+
+        if (query.Search is { } search)
+        {
+            // LIKE rather than Contains: EF translates Contains to SQLite's instr(), which is
+            // case-sensitive, and an operator typing "landlord" expects to find "Landlord". SQLite's
+            // LIKE is case-insensitive for ASCII. The wildcards are escaped so a name containing % or _
+            // searches for those characters rather than matching everything.
+            var pattern = $"%{Escape(search)}%";
+            filtered = filtered.Where(c => EF.Functions.Like(c.Recording!.Name, pattern, LikeEscape));
+        }
 
         var totalCount = await filtered.CountAsync(cancellationToken);
         if (totalCount == 0)

@@ -34,4 +34,14 @@ public class PhoneNumberTests
     {
         Assert.Equal(PhoneNumber.Parse("(305) 555-1234"), PhoneNumber.Parse("+1 305 555 1234"));
     }
+
+    [Theory]
+    [InlineData("+13055551234", "(305) 555-1234")]
+    [InlineData("+441632960123", "+441632960123")]
+    [InlineData("+130555512", "+130555512")]
+    public void ToDisplayString_groups_nanp_numbers_and_leaves_everything_else_alone(
+        string e164, string expected)
+    {
+        Assert.Equal(expected, PhoneNumber.Parse(e164).ToDisplayString());
+    }
 }

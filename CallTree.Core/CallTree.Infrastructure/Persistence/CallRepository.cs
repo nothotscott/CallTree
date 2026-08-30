@@ -15,6 +15,12 @@ public class CallRepository(CallTreeDbContext dbContext) : ICallRepository
             .Include(c => c.Recording)
             .FirstOrDefaultAsync(c => c.Id == id, cancellationToken);
 
+    public Task<Call?> GetByRecordingIdAsync(Guid recordingId, CancellationToken cancellationToken = default) =>
+        dbContext.Calls
+            .Include(c => c.Legs)
+            .Include(c => c.Recording)
+            .FirstOrDefaultAsync(c => c.Recording != null && c.Recording.Id == recordingId, cancellationToken);
+
     public Task SaveChangesAsync(CancellationToken cancellationToken = default) =>
         dbContext.SaveChangesAsync(cancellationToken);
 }

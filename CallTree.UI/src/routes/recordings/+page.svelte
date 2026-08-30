@@ -29,19 +29,43 @@
 <svelte:head><title>Recordings · CallTree</title></svelte:head>
 
 <section class="space-y-6">
-	<header>
-		<h1 class="text-2xl font-semibold text-slate-900">Recordings</h1>
-		<p class="mt-1 text-sm text-slate-500">
-			{#if result}
-				{#if result.totalCount === 0}
-					No recordings yet.
+	<header class="flex flex-wrap items-end justify-between gap-4">
+		<div>
+			<h1 class="text-2xl font-semibold text-slate-900">Recordings</h1>
+			<p class="mt-1 text-sm text-slate-500">
+				{#if result}
+					{#if result.totalCount === 0}
+						{params.search ? 'No recordings match this search.' : 'No recordings yet.'}
+					{:else}
+						Showing {rangeStart}–{rangeEnd} of {result.totalCount.toLocaleString()} recordings
+					{/if}
 				{:else}
-					Showing {rangeStart}–{rangeEnd} of {result.totalCount.toLocaleString()} recordings
+					Could not reach the API.
 				{/if}
-			{:else}
-				Could not reach the API.
-			{/if}
-		</p>
+			</p>
+		</div>
+
+		<!-- A plain GET form, same as the call log's filters: the search lives in the URL, so a
+		     search result can be linked and the back button does the right thing. -->
+		<form method="GET" action={resolve('/recordings')} class="flex items-end gap-3">
+			<label class="text-sm">
+				<span class="mb-1 block font-medium text-slate-600">Search names</span>
+				<input
+					type="search"
+					name="search"
+					value={params.search ?? ''}
+					placeholder="e.g. landlord"
+					class="w-56 rounded-md border border-slate-300 bg-white px-2 py-1.5 text-sm text-slate-900 shadow-sm"
+				/>
+			</label>
+
+			<button
+				type="submit"
+				class="rounded-md bg-slate-900 px-3 py-1.5 text-sm font-medium text-white hover:bg-slate-700"
+			>
+				Search
+			</button>
+		</form>
 	</header>
 
 	{#if data.error}
@@ -56,10 +80,11 @@
 		</div>
 	{:else if result}
 		<div class="overflow-x-auto rounded-lg border border-slate-200 bg-white shadow-sm">
-			<table class="w-full min-w-[48rem] border-collapse text-sm">
+			<table class="w-full min-w-[60rem] border-collapse text-sm">
 				<thead class="bg-slate-50 text-left text-xs tracking-wide text-slate-500 uppercase">
 					<tr>
 						<th scope="col" class="px-4 py-3 font-medium">Recorded</th>
+						<th scope="col" class="px-4 py-3 font-medium">Name</th>
 						<th scope="col" class="px-4 py-3 font-medium">Caller</th>
 						<th scope="col" class="px-4 py-3 font-medium">Source</th>
 						<th scope="col" class="px-4 py-3 text-right font-medium">Duration</th>
@@ -80,8 +105,18 @@
 								></a>
 								{formatTimestamp(recording.createdAt)}
 							</td>
+							<td class="px-4 py-3">
+								<!-- Truncated rather than wrapped: a hand-written name can run long and the
+								     row is a single click target, so a two-line cell just costs scanning. -->
+								<span
+									class="block max-w-[22rem] truncate font-medium text-slate-900"
+									title={recording.name}
+								>
+									{recording.name}
+								</span>
+							</td>
 							<td class="px-4 py-3 whitespace-nowrap">
-								<span class="font-medium text-slate-900">{callerLabel(recording)}</span>
+								<span class="text-slate-700">{callerLabel(recording)}</span>
 								{#if !recording.remoteNumber}
 									<!-- The raw header did not parse as a number; scanners send junk here. -->
 									<span class="ml-1 text-xs text-slate-400">(unparsed)</span>
@@ -112,8 +147,8 @@
 						</tr>
 					{:else}
 						<tr>
-							<td colspan="6" class="px-4 py-10 text-center text-slate-500">
-								No recordings to show.
+							<td colspan="7" class="px-4 py-10 text-center text-slate-500">
+								{params.search ? 'No recordings match this search.' : 'No recordings to show.'}
 							</td>
 						</tr>
 					{/each}

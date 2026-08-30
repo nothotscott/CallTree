@@ -124,7 +124,14 @@ public class Call : AggregateRoot
             throw new InvalidOperationException($"Call {Id} already has a recording.");
         }
 
-        Recording = new Recording(filePath, channelLayout, when);
+        // The default name is built here rather than by the caller so that no path can create a nameless
+        // recording. Everything it needs - who called and when - the aggregate already holds.
+        Recording = new Recording(
+            filePath,
+            channelLayout,
+            when,
+            RecordingName.Default(Source, InboundLeg.RemoteNumber, InboundLeg.RawCallerId, when));
+
         return Recording;
     }
 

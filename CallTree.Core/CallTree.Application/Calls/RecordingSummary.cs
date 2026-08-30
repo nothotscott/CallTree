@@ -14,6 +14,9 @@ public sealed record RecordingSummary
 
     public required Guid CallId { get; init; }
 
+    /// <summary>What the operator calls this recording. Never blank - see <c>RecordingName</c>.</summary>
+    public required string Name { get; init; }
+
     /// <summary>Business direction of the call this recording belongs to.</summary>
     public required CallSource CallSource { get; init; }
 
@@ -50,6 +53,7 @@ public sealed record RecordingSummary
         {
             Id = recording.Id,
             CallId = call.Id,
+            Name = recording.Name,
             CallSource = call.Source,
             RemoteNumber = inboundLeg?.RemoteNumber?.Value,
             RawCallerId = inboundLeg?.RawCallerId ?? "",
