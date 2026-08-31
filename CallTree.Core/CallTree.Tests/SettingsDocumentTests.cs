@@ -1,5 +1,7 @@
 using System.Text.Json.Nodes;
 using CallTree.Api.Settings;
+using CallTree.Application.Configuration;
+using CallTree.Messaging.Configuration;
 using CallTree.Telephony.Configuration;
 using Xunit;
 
@@ -11,7 +13,10 @@ namespace CallTree.Tests;
 /// </summary>
 public class SettingsDocumentTests
 {
-    private static SettingsUpdate Update(string? password = null, string? authUsername = null) => new()
+    private static SettingsUpdate Update(
+        string? password = null,
+        string? authUsername = null,
+        string? apiKey = null) => new()
     {
         Telephony = new TelephonySettings
         {
@@ -34,7 +39,18 @@ public class SettingsDocumentTests
             AuthUsername = authUsername,
             RegistrationExpirySeconds = 120,
         },
+        Messaging = new MessagingSettings
+        {
+            Enabled = true,
+            PublicKey = "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=",
+            MessagingProfileId = "profile-1",
+            RequireSignature = true,
+            SignatureToleranceSeconds = 300,
+            NotifyOnFailure = true,
+            ApiTimeoutSeconds = 10,
+        },
         TrunkPassword = password,
+        MessagingApiKey = apiKey,
     };
 
     [Fact]
@@ -110,11 +126,15 @@ public class SettingsDocumentTests
     [Fact]
     public void Round_trips_options_through_the_settings_shape()
     {
-        var options = new TelephonyOptions { DidNumber = "+15550002222", ScreeningTimeoutSeconds = 30 };
+        var options = new TelephonyOptions { PublicHost = "example.test", ScreeningTimeoutSeconds = 30 };
+        var line = new LineOptions { DidNumber = "+15550002222", MyCellNumber = "+15550001111" };
+        var settings = SettingsDocument.ToSettings(options, line);
 
-        var applied = SettingsDocument.Apply(options, SettingsDocument.ToSettings(options), outboundPin: null);
+        Assert.Equal(options, SettingsDocument.Apply(options, settings, outboundPin: null));
 
-        Assert.Equal(options, applied);
+        // The DTO is one form covering two options types, so the other half has to survive the trip too
+        // - the two numbers are on LineOptions because the messaging layer needs them as well.
+        Assert.Equal(line, SettingsDocument.Apply(line, settings));
     }
 
     [Fact]
@@ -122,11 +142,12 @@ public class SettingsDocumentTests
     {
         // Same trap as the trunk password: a save of any unrelated field must not turn off the gate on
         // the path that answers automatically and records.
-        var current = new TelephonyOptions { OutboundPin = "4821", DidNumber = "+15550002222" };
+        var current = new TelephonyOptions { OutboundPin = "4821" };
+        var line = new LineOptions { DidNumber = "+15550002222" };
 
         var applied = SettingsDocument.Apply(
             current,
-            SettingsDocument.ToSettings(current) with { ScreeningTimeoutSeconds = 20 },
+            SettingsDocument.ToSettings(current, line) with { ScreeningTimeoutSeconds = 20 },
             outboundPin: null);
 
         Assert.Equal("4821", applied.OutboundPin);
@@ -138,7 +159,8 @@ public class SettingsDocumentTests
     {
         var current = new TelephonyOptions { OutboundPin = "4821" };
 
-        var applied = SettingsDocument.Apply(current, SettingsDocument.ToSettings(current), outboundPin: "");
+        var applied = SettingsDocument.Apply(
+            current, SettingsDocument.ToSettings(current, new LineOptions()), outboundPin: "");
 
         Assert.Equal("", applied.OutboundPin);
     }
@@ -165,5 +187,59 @@ public class SettingsDocumentTests
 
         Assert.Equal("new.example.test", applied.Host);
         Assert.Equal("already-set", applied.Password);
+    }
+
+    [Fact]
+    public void Does_not_introduce_an_api_key_when_none_is_supplied()
+    {
+        // Third instance of the same rule, and the same failure if it is broken: an empty value here
+        // would override a key coming from user secrets or the environment, and the next inbound text
+        // would be recorded and never forwarded.
+        var document = SettingsDocument.Apply([], Update(apiKey: null));
+
+        Assert.False(document["Messaging"]!.AsObject().ContainsKey("ApiKey"));
+        Assert.True((bool)document["Messaging"]!["Enabled"]!);
+        Assert.Equal("profile-1", (string?)document["Messaging"]!["MessagingProfileId"]);
+    }
+
+    [Fact]
+    public void Writes_the_api_key_when_one_is_supplied()
+    {
+        var document = SettingsDocument.Apply([], Update(apiKey: "KEY123"));
+
+        Assert.Equal("KEY123", (string?)document["Messaging"]!["ApiKey"]);
+    }
+
+    [Fact]
+    public void Applying_messaging_settings_keeps_the_current_api_key_when_none_is_given()
+    {
+        var current = new MessagingOptions { ApiKey = "already-set", Enabled = false };
+
+        var applied = SettingsDocument.Apply(
+            current,
+            SettingsDocument.ToSettings(current) with { Enabled = true },
+            apiKey: null);
+
+        Assert.True(applied.Enabled);
+        Assert.Equal("already-set", applied.ApiKey);
+    }
+
+    [Fact]
+    public void Round_trips_messaging_options_through_the_settings_shape()
+    {
+        var options = new MessagingOptions
+        {
+            Enabled = true,
+            PublicKey = "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=",
+            MessagingProfileId = "profile-1",
+            RequireSignature = false,
+            SignatureToleranceSeconds = 120,
+            NotifyOnFailure = false,
+            ApiTimeoutSeconds = 20,
+        };
+
+        var applied = SettingsDocument.Apply(options, SettingsDocument.ToSettings(options), apiKey: null);
+
+        Assert.Equal(options, applied);
     }
 }

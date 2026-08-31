@@ -21,6 +21,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\CallTree.Infrastructure\CallTree.Infrastructure.csproj" />
+    <ProjectReference Include="..\CallTree.Messaging\CallTree.Messaging.csproj" />
     <ProjectReference Include="..\CallTree.Telephony\CallTree.Telephony.csproj" />
   </ItemGroup>
 

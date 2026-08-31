@@ -1,4 +1,5 @@
 using CallTree.Domain.Calls;
+using CallTree.Domain.Messages;
 using CallTree.Domain.ValueObjects;
 using Microsoft.EntityFrameworkCore;
 
@@ -7,6 +8,8 @@ namespace CallTree.Infrastructure.Persistence;
 public class CallTreeDbContext(DbContextOptions<CallTreeDbContext> options) : DbContext(options)
 {
     public DbSet<Call> Calls => Set<Call>();
+
+    public DbSet<Message> Messages => Set<Message>();
 
     protected override void ConfigureConventions(ModelConfigurationBuilder configurationBuilder)
     {
@@ -67,6 +70,56 @@ public class CallTreeDbContext(DbContextOptions<CallTreeDbContext> options) : Db
             recording.Property(r => r.ChannelLayout).HasConversion<string>();
             recording.Property(r => r.FilePath).HasMaxLength(1024);
             recording.Property(r => r.Name).HasMaxLength(RecordingName.MaxLength);
+        });
+
+        modelBuilder.Entity<Message>(message =>
+        {
+            message.HasKey(m => m.Id);
+            message.Property(m => m.Id).ValueGeneratedNever();
+            message.Ignore(m => m.DomainEvents);
+            message.Property(m => m.Source).HasConversion<string>();
+            message.Property(m => m.Status).HasConversion<string>();
+            message.Property(m => m.Body).HasMaxLength(SmsText.MaxLength);
+            message.Property(m => m.FailureReason).HasMaxLength(500);
+            message.Property(m => m.ProviderMessageId).HasMaxLength(128);
+
+            message.Property(m => m.From)
+                .HasConversion(v => v.Value, v => PhoneNumber.Parse(v))
+                .HasMaxLength(20);
+            message.Property(m => m.To)
+                .HasConversion(v => v.Value, v => PhoneNumber.Parse(v))
+                .HasMaxLength(20);
+
+            message.HasOne(m => m.Relay)
+                .WithOne()
+                .HasForeignKey<Relay>("MessageId")
+                .OnDelete(DeleteBehavior.Cascade);
+
+            // Unique, not merely indexed: this is what makes taking a message in idempotent. The
+            // provider retries a webhook on any non-2xx and on a slow response, and a duplicated
+            // forward costs money and buzzes the operator a second time. MessageRepository.ExistsAsync
+            // is the check that normally catches it; the constraint is the backstop for two retries
+            // genuinely in flight at once, which fails the write rather than sending twice.
+            message.HasIndex(m => m.ProviderMessageId).IsUnique();
+            message.HasIndex(m => m.ReceivedAt);
+            message.HasIndex(m => m.Source);
+        });
+
+        modelBuilder.Entity<Relay>(relay =>
+        {
+            relay.HasKey(r => r.Id);
+            relay.Property(r => r.Id).ValueGeneratedNever();
+            relay.Property(r => r.Delivery).HasConversion<string>();
+            relay.Property(r => r.Body).HasMaxLength(SmsText.MaxLength);
+            relay.Property(r => r.Error).HasMaxLength(500);
+            relay.Property(r => r.ProviderMessageId).HasMaxLength(128);
+            relay.Property(r => r.Recipient)
+                .HasConversion(v => v.Value, v => PhoneNumber.Parse(v))
+                .HasMaxLength(20);
+
+            // Delivery receipts arrive keyed by the provider id of the message we sent, so this is a
+            // lookup path, not just a column.
+            relay.HasIndex(r => r.ProviderMessageId);
         });
     }
 }

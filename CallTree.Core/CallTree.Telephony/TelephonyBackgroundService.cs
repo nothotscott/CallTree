@@ -1,5 +1,6 @@
 using System.Net;
 using CallTree.Application.Calls;
+using CallTree.Application.Configuration;
 using CallTree.Domain.Calls;
 using CallTree.Domain.ValueObjects;
 using CallTree.Telephony.Audio;
@@ -30,6 +31,7 @@ namespace CallTree.Telephony;
 public class TelephonyBackgroundService(
     IOptionsMonitor<TrunkOptions> trunkOptions,
     IOptionsMonitor<TelephonyOptions> telephonyOptions,
+    IOptionsMonitor<LineOptions> lineOptions,
     TelephonySettingsWatcher settingsWatcher,
     TelephonyStatus status,
     PromptLibrary prompts,
@@ -48,12 +50,10 @@ public class TelephonyBackgroundService(
     /// The configured mobile, re-read per call: it costs a parse and means the settings UI can correct a
     /// mistyped number without a restart, which matters because getting it wrong misclassifies every call.
     /// </summary>
-    private PhoneNumber? MyCellNumber =>
-        PhoneNumber.TryParse(telephonyOptions.CurrentValue.MyCellNumber, out var number) ? number : null;
+    private PhoneNumber? MyCellNumber => lineOptions.CurrentValue.MyCell;
 
     /// <summary>Our DID, re-read per call for the same reason.</summary>
-    private PhoneNumber? DidNumber =>
-        PhoneNumber.TryParse(telephonyOptions.CurrentValue.DidNumber, out var number) ? number : null;
+    private PhoneNumber? DidNumber => lineOptions.CurrentValue.Did;
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {

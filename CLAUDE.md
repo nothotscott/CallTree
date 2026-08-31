@@ -19,6 +19,14 @@ One DID; all calls to/from it pass through CallTree. Calls are classified by cal
 Naming note: `Outbound`/`Inbound` are **business** classifications; both start as inbound SIP INVITEs.
 `LegDirection` is the SIP-level direction.
 
+SMS on the same DID is classified the same way, by the sender's number, and the naming note applies
+identically — both kinds arrive as an *inbound* message on the provider's webhook:
+
+- **MessageSource.Outbound** — from `Telephony:MyCellNumber`. The body is a `{RECIPIENT-NUMBER} Body of
+  text` command; the number is parsed off the front and the rest is sent from the DID. The messaging
+  counterpart of the outbound proxy dial.
+- **MessageSource.Inbound** — anyone else. Recorded and forwarded to the mobile with the sender on the front.
+
 ## Status
 
 Phases 0–5 complete and validated by real phone calls — registration, inbound signalling, prompt playback,
@@ -65,6 +73,25 @@ API and already ships in the frontend. Recordings carry an editable **`Name`** �
 caller and the recording date by `RecordingName`, renamed through `PATCH /api/recordings/{id}`, and
 searchable from the list.
 
+**SMS (Phase 9): validated by the operator. Receiving works; sending is blocked by the carrier, not by
+code.** Real texts confirmed the webhook, the signature check and the message log end to end. Outbound is
+refused by Telnyx with *"The sending number is not 10DLC-registered but is required to be by the
+carrier"* — a US carrier registration requirement for application-to-person traffic on a long code, which
+no amount of code changes here can work around. **Do not treat that error as a bug to debug.**
+
+So the DID currently runs **receive-only**, which is now a first-class mode rather than a degraded one:
+`Messaging:Enabled` with a blank `Messaging:ApiKey` records everything texted to the DID and sends
+nothing at all. See the receive-only gotcha below for why that has its own `MessageStatus` — the short
+version is that the alternative was a message log where every row said `Failed`.
+
+If 10DLC registration is ever completed (brand + campaign through the provider, one-off fee plus a
+monthly campaign charge; a sole proprietor can register without an EIN at lower throughput), the sending
+half needs no code: set `Messaging:ApiKey` and the existing forward and `{RECIPIENT-NUMBER} Body` paths
+take over. Those paths remain unit-tested and exercised against a running instance with real Ed25519-signed
+webhooks — idempotency on retry, the DID filter, signature and replay rejection, and delivery receipts —
+and the provider's REST API was reached for real, so what is unproven is the carrier's acceptance, not the
+request shape. See PROGRESS.md.
+
 **Workflow rule: one phase at a time.** The maintainer validates each telephony phase by phone before the
 next begins.
 
@@ -79,17 +106,20 @@ CallTree/
 ├── CallTree.Core/           # backend (.NET 10, CallTree.Core.slnx)
 │   ├── CallTree.Domain/         # aggregates, VOs, enums, domain events — no dependencies
 │   ├── CallTree.Application/    # ports (ICallRepository), CallLifecycleService, call commands,
-│   │                            #   StorageOptions (shared by Infrastructure and Telephony)
+│   │                            #   StorageOptions (Infrastructure + Telephony), LineOptions (both siblings)
 │   ├── CallTree.Infrastructure/ # EF Core + SQLite (CallTreeDbContext, migrations, CallRepository)
 │   ├── CallTree.Telephony/      # SIPSorcery + NAudio; TelephonyBackgroundService owns the SIP UA
 │   │                            #   Audio/ holds prompts, the G.711 decode and the recording pipeline
+│   ├── CallTree.Messaging/      # SMS over the provider's HTTPS API, not SIP. SmsRelayService owns the
+│   │                            #   policy; Telnyx/ holds the REST client and the webhook signature check
 │   ├── CallTree.Api/            # ASP.NET Core host; DI wiring; /health; Scalar at /scalar (dev)
 │   │                            #   Settings/ owns the writable config file the UI edits
 │   └── CallTree.Tests/          # xUnit v3 — pure-logic tests only (state machine, PhoneNumber, WAV logic)
 └── CallTree.UI/             # SvelteKit frontend (has its own CLAUDE.md/AGENTS.md — read them)
 ```
 
-Dependency direction: `Api → {Telephony, Infrastructure} → Application → Domain`.
+Dependency direction: `Api → {Telephony, Messaging, Infrastructure} → Application → Domain`.
+**Telephony and Messaging are siblings and must not reference each other.**
 
 ## Architecture rules
 
@@ -125,6 +155,31 @@ Dependency direction: `Api → {Telephony, Infrastructure} → Application → D
   neither layer may reference the other. Don't "tidy" it back into Infrastructure and bind the same
   section into a second options type — one setting in two places is exactly the trap `Telephony:TraceSip`
   used to be in.
+- **`LineOptions` follows the same rule, and is the reason `Telephony:DidNumber` and
+  `Telephony:MyCellNumber` are not on `TelephonyOptions`.** Both the SIP stack and the messaging layer
+  need those two numbers — to classify a caller/sender, to filter INVITEs and webhooks, and as the `From`
+  on anything they originate — and they are siblings. So the two keys moved to `LineOptions` in
+  Application, bound in `AddApplication` from the **`Telephony` section** (`SectionName = "Telephony"`)
+  so every existing `config.json`, environment variable and deployment note keeps working. The section is
+  shared between two options types; no key is. Don't put them back on `TelephonyOptions`, and don't bind
+  the section into a third type. `LineOptions.Did`/`.MyCell` do the `PhoneNumber.TryParse` once so callers
+  don't each repeat it.
+- **Messaging writes never go through `ICallCommands`.** Every message write originates in a provider
+  webhook — an HTTP request, which already has a DI scope — so `SmsRelayService` (Messaging, policy)
+  calls `MessageLifecycleService` (Application, transitions) directly. That is the `RecordingService`
+  precedent, not the telephony one: the scope-factory plumbing exists for SIPSorcery's long-lived
+  callbacks and a request handler needs none of it.
+- **`GET /api/messages/capabilities` exists so the UI never has to fetch `/api/config` to render.** Two
+  booleans — `enabled`, `canSend` — both derivable from the settings document, deliberately given their
+  own endpoint anyway. `/api/config` is the settings page's write model: it carries the config file path,
+  the environment overrides and the pending-restart keys, and it is the response for the one endpoint
+  that can point the trunk somewhere else. The root layout asks this on every page load to decide whether
+  a Messages link is worth offering; tying that to the settings endpoint would be the wrong coupling.
+- **A `Relay` is a fact, never a `MessageStatus`** — the same rule as `Recording` on a call. Whether the
+  carrier delivered what CallTree sent on arrives minutes later on a separate webhook, and
+  `Message.RecordDelivery` touches only the `Relay` for exactly the reason `FinalizeRecording` touches
+  only the `Recording`: no changed columns on the parent means EF emits no `UPDATE` for it, so a late
+  receipt cannot overwrite a newer status with a stale one.
 - Enums persist as strings; timestamps are `DateTimeOffset` passed explicitly into domain methods (testability).
 - Trunk credentials/config live in options bound from configuration, never in the DB or the domain.
 - **Configuration is three layers**: `appsettings.json` < `Storage:ConfigFile` (`data/config.json`, what
@@ -319,6 +374,65 @@ stage and copies them into the API's `wwwroot`. One container, one port, one ori
   missing doesn't error, it just leaves the container permanently `unhealthy`.
 - **Only one instance may hold the trunk registration.** The provider keeps the most recent binding, so a
   second instance on the same credential silently steals inbound calls. Stop the old one before deploying.
+  **This bites during local testing too**: user secrets supply the real trunk credentials in Development,
+  so a `dotnet run` started merely to poke an HTTP endpoint registers with the live trunk and takes the
+  binding. Set `Trunk__Host=""` (blank host makes `TrunkOptions.IsConfigured` false, and the hosted
+  service returns before it opens a socket) whenever the run is not about telephony. Done once already.
+- **SMS is not SIP.** Messages arrive on the provider's HTTPS webhook (`POST /api/messaging/telnyx`) and
+  are sent over its REST API; none of it touches the trunk, the SIP port or SIPSorcery. Consequences worth
+  holding on to: it needs its own public exposure (a TLS reverse proxy), it works while
+  `Trunk:Host` is blank and telephony is idle, and every `Messaging:` setting applies without a restart
+  because it is read per request — none of them belongs in `TelephonySettingsWatcher`.
+- **The webhook signature check is the whole door, and .NET cannot do Ed25519.** `/api/messaging/telnyx`
+  is the one endpoint meant to be publicly reachable, nothing else in this API authenticates anything, and
+  a request that gets through makes the instance send a text at the operator's expense — the messaging
+  twin of the toll-fraud exposure the DID filter closes. `TelnyxSignatureVerifier` fails **closed**
+  (no key configured = refuse everything) and rejects anything older than
+  `Messaging:SignatureToleranceSeconds` so a captured request is not replayable forever. It uses
+  BouncyCastle because .NET 10 still has no standalone Ed25519 — the only occurrence in
+  `System.Security.Cryptography` is inside the Composite ML-DSA algorithm identifiers, which cannot verify
+  a bare signature. BouncyCastle is already in the graph via SIPSorcery (DTLS-SRTP); Messaging references
+  it directly because it uses it directly and cannot reference Telephony.
+- **The signature covers `{telnyx-timestamp}|{raw body}`, so the controller must read the body as a
+  string.** Model-binding it and re-serializing changes whitespace and key order and nothing ever
+  verifies. `MessagingWebhookController` reads `Request.Body` itself and hands the same string to both the
+  verifier and the parser; don't "tidy" it into a `[FromBody]` parameter.
+- **Answer 200 to anything understood, including duplicates.** The provider retries every non-2xx and every
+  slow response, and a retried inbound message means a second forward — money, and a second buzz on the
+  operator's phone. `Message.ProviderMessageId` is uniquely indexed and checked before insert;
+  `WebhookOutcome.Ignored` (a duplicate, an event we don't act on, a message for someone else's number) is
+  a 200, and only a body we genuinely cannot read is a 400. The unique index is the backstop for two
+  retries in flight at once: that write fails, the request 500s, and the next retry finds the row and stops.
+- **`SmsCommand` parses at whitespace boundaries only, and the two stop rules are ordered.** A number may
+  be written with spaces in it *and* be followed by a body that starts with digits, so: a canonical NANP
+  length (10 digits, or 11 starting with 1) ends the recipient immediately whatever follows — that is what
+  makes `305-555-1234 42 is the answer` send "42 is the answer" — and otherwise the end of the run of
+  number-shaped tokens ends it, which is what lets `+44 79 1112 3456 hi` work. Scanning for "the first
+  prefix that parses" is the tempting simplification and it is wrong: `PhoneNumber.TryParse` accepts
+  `+1305555123`, so it would cut `+13055551234` short and text a stranger. A non-NANP `+` number followed
+  by a numeric first word is left ambiguous on purpose — it fails loudly rather than sending to the
+  wrong number.
+- **Forwarding adds a prefix to a body that may already be at the provider's 1600-character limit.** Over
+  that, the send is refused outright, so the message would be lost rather than trimmed — on the one path
+  the whole feature exists for. `ForwardText` budgets for its own prefix and attachment note;
+  `SmsText.Truncate` marks what it cut. Don't concatenate and hope.
+- **A blank `Messaging:ApiKey` is a mode, not a misconfiguration, and `MessageStatus.Recorded` exists to
+  say so.** Messaging enabled with no key is a receive-only line — the only way to run a US long code
+  that is not 10DLC-registered, since carriers refuse everything such a number sends while letting it
+  receive normally. `SmsRelayService.ReceiveOnlyAsync` short-circuits before any relay: an inbound
+  message ends at `Recorded` with no `FailureReason`, and a send command ends at `Rejected` (the operator
+  asked for something the line cannot do) with no failure notice, because the notice would need the key
+  that is missing. Letting these fall through to the relay would "work" — `TelnyxClient` refuses politely
+  with "Messaging:ApiKey is not set" — and would end *every message the operator ever receives* at
+  `Failed`. A log that is entirely red is a log nobody reads. Don't collapse `Recorded` back into
+  `Received` (it is terminal, and a key added later must not retroactively forward old texts) or into
+  `Rejected` (nothing was rejected).
+- **MMS media is counted, never forwarded**, and the note in the forwarded text is the only trace the
+  operator gets that a picture exists. Don't quietly drop the note to tidy the message up.
+- **The failure notice texted back to the operator is deliberately not a `Relay`** — nothing was relayed —
+  so delivery receipts for it find no relay and are ignored, which is ordinary rather than an error. And
+  there is no notice on the *inbound forward* failure path: the channel a notice would use is the one that
+  just failed. Say so rather than "fixing" it.
 - **Legal: recording consent varies by jurisdiction**, and several require *all* parties to consent rather
   than one. The disclosure approach was an open decision for the operator; it is now decided (spoken
   notice on each path, tone off — see Status) but the rule stands regardless of what gets decided: never

@@ -5,10 +5,12 @@
 		saveSettings,
 		SettingsSaveError,
 		type FieldErrors,
+		type MessagingSettings,
 		type SettingsResponse,
 		type TelephonySettings,
 		type TrunkSettings
 	} from '$lib/api/config';
+	import { messagingCapability } from '$lib/messaging.svelte';
 	import type { PageProps } from './$types';
 
 	let { data }: PageProps = $props();
@@ -19,9 +21,20 @@
 	// Editable copies, so an abandoned edit never misrepresents what the backend is running.
 	let telephony = $state<TelephonySettings | null>(null);
 	let trunk = $state<TrunkSettings | null>(null);
+	let messaging = $state<MessagingSettings | null>(null);
 
 	/** Empty means "leave the configured password alone"; it is never sent in that case. */
 	let password = $state('');
+
+	// The messaging API key needs the switch as well as the box, for the PIN's reason rather than the
+	// trunk password's: blank has to keep meaning "unchanged", so an empty string is the only way to say
+	// "remove the key", and there is no way to type that. Unchecking is not the same as unchecking
+	// "Enable SMS" - that turns the webhook off and stops messages arriving at all, where this leaves a
+	// receive-only line that still records everything texted to the DID. That is the only way a US long
+	// code can be run before it is 10DLC-registered, so it has to be reachable from here.
+	let sendingEnabled = $state(false);
+	let apiKey = $state('');
+	let apiKeyError = $state<string | null>(null);
 
 	// The PIN needs a switch as well as a box, because blank has to keep meaning "unchanged" — without
 	// the switch there would be no way to express "turn the gate off" at all.
@@ -45,7 +58,11 @@
 		settings = next;
 		telephony = next ? { ...next.telephony } : null;
 		trunk = next ? { ...next.trunk } : null;
+		messaging = next ? { ...next.messaging } : null;
 		password = '';
+		sendingEnabled = next?.messagingApiKeySet ?? false;
+		apiKey = '';
+		apiKeyError = null;
 		pinRequired = next?.outboundPinSet ?? false;
 		pin = '';
 		pinError = null;
@@ -63,7 +80,7 @@
 
 	async function save(event: SubmitEvent) {
 		event.preventDefault();
-		if (!telephony || !trunk) return;
+		if (!telephony || !trunk || !messaging) return;
 
 		// Asking for a PIN without ever supplying one would save nothing and leave the switch claiming
 		// a gate that is not there - worse than refusing, because the operator would believe it.
@@ -71,7 +88,15 @@
 			pinRequired && !settings?.outboundPinSet && pin.length === 0
 				? 'Enter the PIN you want to require.'
 				: null;
-		if (pinError) return;
+
+		// Same trap on the API key: asking to send with no key to send with would save nothing and leave
+		// the switch claiming an ability the line does not have.
+		apiKeyError =
+			sendingEnabled && !settings?.messagingApiKeySet && apiKey.length === 0
+				? 'Enter the API key to send with, or turn sending off to run receive-only.'
+				: null;
+
+		if (pinError || apiKeyError) return;
 
 		saving = true;
 		saved = false;
@@ -81,27 +106,43 @@
 		// Null leaves the PIN alone; an empty string is the only way to say "remove it".
 		const sentPin = pinRequired ? (pin.length > 0 ? pin : null) : '';
 
+		// And the same for the API key, which is what makes the line receive-only.
+		const sentApiKey = sendingEnabled ? (apiKey.length > 0 ? apiKey : null) : '';
+
 		try {
 			const saveResult = await saveSettings({
 				telephony,
 				trunk,
+				messaging,
 				// Omitted unless one was typed. The API treats null as "unchanged", which is what keeps
 				// a password set from user secrets or the environment from being blanked by a save.
 				trunkPassword: password.length > 0 ? password : null,
-				outboundPin: sentPin
+				outboundPin: sentPin,
+				messagingApiKey: sentApiKey
 			});
 
 			settings = saveResult;
 			telephony = { ...saveResult.telephony };
 			trunk = { ...saveResult.trunk };
+			messaging = { ...saveResult.messaging };
 			password = '';
 			pin = '';
+			apiKey = '';
 
 			// Set from what was sent, not from the response. When the PIN was not part of this save the
 			// response can still describe the configuration as it was before it — the file the API just
 			// wrote is reloaded asynchronously — and adopting that would flip the switch off on its own.
 			// The next save would then send an empty PIN and genuinely remove the gate.
 			if (sentPin !== null) pinRequired = sentPin.length > 0;
+			if (sentApiKey !== null) sendingEnabled = sentApiKey.length > 0;
+
+			// Tell the rest of the app, from the response rather than by re-reading the API, for the same
+			// asynchronous-reload reason. This is what makes the Messages link appear the moment SMS is
+			// switched on, and the relay columns appear the moment a key is added.
+			messagingCapability.set({
+				enabled: saveResult.messaging.enabled,
+				canSend: saveResult.messaging.enabled && saveResult.messagingApiKeySet
+			});
 
 			saved = true;
 		} catch (cause) {
@@ -142,8 +183,8 @@
 	<header>
 		<h1 class="text-2xl font-semibold text-slate-900">Settings</h1>
 		<p class="mt-1 text-sm text-slate-500">
-			Telephony and trunk configuration. Saved to a file on the server, layered over the settings
-			the image ships with and beneath anything set in the environment.
+			Telephony, trunk and messaging configuration. Saved to a file on the server, layered over the
+			settings the image ships with and beneath anything set in the environment.
 		</p>
 	</header>
 
@@ -157,7 +198,7 @@
 				from <code class="rounded bg-rose-100 px-1 py-0.5">CallTree.Core</code>.
 			</p>
 		</div>
-	{:else if settings && telephony && trunk}
+	{:else if settings && telephony && trunk && messaging}
 		{#if pending.length > 0}
 			<div class="rounded-lg border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900">
 				<p class="font-medium">Restart the service to apply these.</p>
@@ -429,6 +470,170 @@
 						'Write-only: the current value is never sent to this page. Leave blank to keep it.'
 					)}
 				</label>
+			</fieldset>
+
+			<fieldset
+				disabled={saving}
+				class="space-y-4 rounded-lg border border-slate-200 bg-white p-5 shadow-sm"
+			>
+				<legend class="px-1 text-sm font-semibold text-slate-900">Messaging (SMS)</legend>
+				<p class="text-xs text-slate-500">
+					{#if sendingEnabled}
+						Texts to your DID are forwarded to your mobile. To send one, text the DID from your
+						mobile as
+						<code class="rounded bg-slate-100 px-1 py-0.5">3055551234 Your message here</code> — the number
+						is read off the front and the rest is sent from the DID.
+					{:else}
+						Texts to your DID are recorded and readable on the Messages page. Nothing is sent on.
+					{/if}
+					Everything here applies immediately; none of it needs a restart.
+				</p>
+
+				<label class="flex items-start gap-2 text-sm">
+					<input type="checkbox" bind:checked={messaging.enabled} class="mt-0.5 rounded" />
+					<span>
+						<span class="font-medium text-slate-700">Enable SMS</span>
+						{@render notes(
+							'Messaging:Enabled',
+							'Off means the webhook answers 404 and nothing is ever sent, whatever else is set here.'
+						)}
+					</span>
+				</label>
+
+				<label class="flex items-start gap-2 text-sm">
+					<input type="checkbox" bind:checked={sendingEnabled} class="mt-0.5 rounded" />
+					<span>
+						<span class="font-medium text-slate-700">Send as well as receive</span>
+						<span class="mt-0.5 block text-xs text-slate-500">
+							Off makes this a receive-only line: texts to the DID are recorded here and nothing is
+							ever sent — no forward to your mobile, no
+							<code class="rounded bg-slate-100 px-1 py-0.5">{'{number} body'}</code> commands, no failure
+							notices. That is the only way to run a US long code that is not 10DLC-registered, since
+							the carrier refuses everything it sends.
+						</span>
+						<!-- The badge that normally says this lives on the API key field, which is hidden the
+						     moment this is unchecked - exactly when the operator needs to be told that
+						     unchecking will not take effect. The environment sits above the config file, so
+						     saving a cleared key here changes nothing while that variable is set. -->
+						{#if !sendingEnabled && includesKey(overrides, 'Messaging:ApiKey')}
+							<span
+								class="mt-1 block rounded bg-amber-100 px-1.5 py-0.5 text-xs font-medium text-amber-800"
+							>
+								Messaging__ApiKey is set in the environment, which overrides the config file.
+								Turning sending off here will not take effect until that variable is removed.
+							</span>
+						{/if}
+					</span>
+				</label>
+
+				{#if sendingEnabled}
+					<label class="block text-sm">
+						<span class="font-medium text-slate-700">API key</span>
+						<input
+							type="password"
+							bind:value={apiKey}
+							class={inputClass}
+							autocomplete="new-password"
+							placeholder={settings.messagingApiKeySet ? 'unchanged' : 'not set'}
+						/>
+						{@render notes(
+							'Messaging:ApiKey',
+							'Write-only, like the trunk password: the current value is never sent to this page.'
+						)}
+						{#if apiKeyError}
+							<span class="mt-1 block text-xs text-rose-700">{apiKeyError}</span>
+						{/if}
+					</label>
+				{/if}
+
+				<label class="block text-sm">
+					<span class="font-medium text-slate-700">Webhook public key</span>
+					<input
+						bind:value={messaging.publicKey}
+						class={inputClass}
+						placeholder="base64, 32 bytes"
+					/>
+					{@render notes(
+						'Messaging:PublicKey',
+						'The Ed25519 key from the provider portal. This is a public key, so it is shown in full - it is what proves a webhook really came from the provider.'
+					)}
+				</label>
+
+				<label class="block text-sm">
+					<span class="font-medium text-slate-700">Messaging profile ID</span>
+					<input
+						bind:value={messaging.messagingProfileId}
+						class={inputClass}
+						placeholder="(optional)"
+					/>
+					{@render notes(
+						'Messaging:MessagingProfileId',
+						'Only needed when the DID belongs to more than one profile; the number alone routes a send.'
+					)}
+				</label>
+
+				<label class="flex items-start gap-2 text-sm">
+					<input type="checkbox" bind:checked={messaging.requireSignature} class="mt-0.5 rounded" />
+					<span>
+						<span class="font-medium text-slate-700">Require a signed webhook</span>
+						{@render notes(
+							'Messaging:RequireSignature',
+							'Leave this on. The webhook URL is public, nothing else authenticates it, and reaching it is enough to make this instance send a text at your expense.'
+						)}
+					</span>
+				</label>
+
+				<!-- Nothing to notify about on a receive-only line, and the notice would need the very key
+				     that is missing to go anywhere. -->
+				{#if sendingEnabled}
+					<label class="flex items-start gap-2 text-sm">
+						<input
+							type="checkbox"
+							bind:checked={messaging.notifyOnFailure}
+							class="mt-0.5 rounded"
+						/>
+						<span>
+							<span class="font-medium text-slate-700">Text me when a send fails</span>
+							{@render notes(
+								'Messaging:NotifyOnFailure',
+								'The phone has no other channel: without this, a mistyped number fails silently and only this site says otherwise. Successful sends are never acknowledged.'
+							)}
+						</span>
+					</label>
+				{/if}
+
+				<div class="grid gap-4 sm:grid-cols-2">
+					<label class="block text-sm">
+						<span class="font-medium text-slate-700">Signature tolerance (seconds)</span>
+						<input
+							type="number"
+							bind:value={messaging.signatureToleranceSeconds}
+							class={inputClass}
+						/>
+						{@render notes(
+							'Messaging:SignatureToleranceSeconds',
+							'How out of date a signed webhook may be, which bounds how long a captured one stays replayable.'
+						)}
+					</label>
+
+					<label class="block text-sm">
+						<span class="font-medium text-slate-700">API timeout (seconds)</span>
+						<input type="number" bind:value={messaging.apiTimeoutSeconds} class={inputClass} />
+						{@render notes(
+							'Messaging:ApiTimeoutSeconds',
+							'The send happens inside the webhook request, so keep this short - a provider that stops answering must not hold that request open.'
+						)}
+					</label>
+				</div>
+
+				{#if messaging.enabled && !messaging.requireSignature}
+					<p
+						class="rounded-md bg-rose-50 p-3 text-xs text-rose-900 ring-1 ring-rose-200 ring-inset"
+					>
+						Signature checking is off. Anyone who finds the webhook URL can make this instance send
+						a text. Turn it back on as soon as the public key is in place.
+					</p>
+				{/if}
 			</fieldset>
 
 			<div class="flex flex-wrap items-center gap-4">

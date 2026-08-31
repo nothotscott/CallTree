@@ -13,8 +13,11 @@ you want a fully featured PBX, use a fully featured PBX.
 > bridging an inbound caller to your mobile with both sides recorded all work, including a ringback tone
 > while your phone rings and a clean hangup from either side. An outbound proxy dial (`*{NUMBER}#` while on
 > a call from your own number, placing a second leg from your DID) is written and unit-tested but not yet
-> validated over the trunk. The SvelteKit web UI has a call log, a recordings browser with playback, a
-> status page and a settings page. See [PROGRESS.md](PROGRESS.md) and [TODO.md](TODO.md).
+> validated over the trunk. **SMS is newly built and not yet validated against a real number** — inbound
+> forwarding and `{number} body` sending are implemented, unit-tested and exercised end to end against a
+> running instance, but nobody has texted the DID yet. The SvelteKit web UI has a call log, a recordings
+> browser with playback, a message log, a status page and a settings page. See
+> [PROGRESS.md](PROGRESS.md) and [TODO.md](TODO.md).
 
 ## How it works
 
@@ -32,12 +35,27 @@ One number; every call to or from it passes through CallTree, which classifies e
 Both start life as inbound SIP INVITEs — `Outbound`/`Inbound` describe the *business* meaning, while
 `LegDirection` describes the SIP-level direction of an individual leg.
 
+**Text messages work the same way**, classified by the sender's number rather than the caller ID:
+
+- **`MessageSource.Inbound`** — anyone else texting your DID. The message is recorded and forwarded to
+  your mobile with the sender's number on the front, so you can read who it is from and reply.
+- **`MessageSource.Outbound`** — a text from your own mobile to the DID, in the form
+  `{RECIPIENT-NUMBER} Body of text`. The number is parsed off the front (brackets, dashes and spaces are
+  all fine) and the rest is sent from your DID — the messaging counterpart of the outbound proxy dial, so
+  the far end sees the DID rather than your real mobile.
+
+Messages arrive over the provider's HTTPS webhook rather than over SIP, so this needs one more thing
+exposed than calls do — see [Messaging](#messaging-sms).
+
 ## Requirements
 
 - [.NET 10 SDK](https://dotnet.microsoft.com/download)
 - A SIP trunk with a DID. Any provider supporting credential registration and PCMU should work; Telnyx is
   the one this has been exercised against.
 - A publicly reachable IP or DDNS hostname, with UDP 5060 and an RTP port range forwarded.
+- For SMS only: a messaging profile at the provider, and an HTTPS route from the internet to
+  `/api/messaging/telnyx`. This is a separate exposure from the SIP/RTP forwards — see
+  [Messaging](#messaging-sms).
 - Node.js and pnpm, only if you want to work on the web UI (SvelteKit; scaffolded, no features yet).
 
 ## Quick start
@@ -94,8 +112,11 @@ waiting. Everything read per call applies immediately — `MyCellNumber`, `DidNu
 `ScreeningTimeoutSeconds`, `DialTimeoutSeconds`, `OutboundPin`, `JitterBufferMilliseconds`,
 `RecordingToneIntervalSeconds` and `TraceSip`.
 
-`config.json` holds the trunk password and the outbound PIN in plain text — necessary if the UI is to set
-them. It is written owner-only where the platform supports it; treat it like the recordings.
+`config.json` holds the trunk password, the outbound PIN and the messaging API key in plain text —
+necessary if the UI is to set them. It is written owner-only where the platform supports it; treat it like
+the recordings.
+
+Everything under `Messaging:` is read per request, so all of it applies without a restart.
 
 | Setting | Default | What it does |
 |---|---|---|
@@ -117,6 +138,14 @@ them. It is written owner-only where the platform supports it; treat it like the
 | `Telephony:PromptsRoot` | `prompts` | Prompt directory, relative to the content root |
 | `Telephony:ListenOnTcp` | `true` | Also accept SIP over TCP |
 | `Telephony:TraceSip` | `false` | Log complete SIP messages. Essential for bring-up, noisy after. Raises the `CallTree.Telephony.SipTrace` log category to `Trace` by itself — there is no second logging setting to keep in step — and applies without a restart |
+| `Messaging:Enabled` | `false` | Master switch for SMS. Off means the webhook answers 404 and nothing is ever sent |
+| `Messaging:ApiKey` | — | Provider API key, sent as a bearer token. A credential — keep it out of committed files. Blank makes the line receive-only |
+| `Messaging:PublicKey` | — | The provider's Ed25519 webhook public key, base64. **Required** while `RequireSignature` is on |
+| `Messaging:MessagingProfileId` | — | Only needed when the DID belongs to more than one messaging profile |
+| `Messaging:RequireSignature` | `true` | Refuse an unsigned or badly-signed webhook. **Leave this on** — see [Security](#security) |
+| `Messaging:SignatureToleranceSeconds` | `300` | How out of date a signed webhook may be, which bounds how long a captured one stays replayable |
+| `Messaging:NotifyOnFailure` | `true` | Text you back when a send command could not be carried out. Successful sends are never acknowledged |
+| `Messaging:ApiTimeoutSeconds` | `10` | Timeout for one provider API call, which happens inside the webhook request |
 | `Storage:RecordingsRoot` | `data/recordings` | Where recordings are written |
 | `Storage:ConfigFile` | `data/config.json` | The file the settings page writes |
 | `ConnectionStrings:CallTree` | `Data Source=data/calltree.db` | SQLite database |
@@ -242,6 +271,65 @@ rules — it is simply the one path here where CallTree can disclose on your beh
 
 This is not legal advice. If you deploy this, work out what your jurisdiction requires first.
 
+## Messaging (SMS)
+
+Texts to your DID are recorded and forwarded to your mobile; texts *from* your mobile to the DID are read
+as send commands. Unlike calls, this does not go over SIP — the provider delivers messages by **HTTPS
+webhook** and accepts sends over its REST API, so setting it up is a different job from setting up the
+trunk.
+
+**Setup**
+
+1. Create a messaging profile at your provider and assign the DID to it.
+2. Point the profile's webhook URL at `https://<your-host>/api/messaging/telnyx`. This has to be
+   reachable from the internet — a reverse proxy with TLS in front of the container is the usual way, and
+   it is a separate exposure from the SIP/RTP port forwards.
+3. Copy the profile's **public key** into `Messaging:PublicKey` and an API key into `Messaging:ApiKey`.
+   Leave the key out to run receive-only — see below.
+4. Turn on `Messaging:Enabled`. `Telephony:DidNumber` and `Telephony:MyCellNumber` must both be set —
+   they are the same two numbers the call paths use.
+
+**Receive-only.** `Messaging:Enabled` with no `Messaging:ApiKey` is a supported mode, not a half-finished
+setup: texts to the DID are recorded and readable on `/messages`, and nothing is ever sent — no forward to
+your mobile, no send commands, no failure notices. Those messages end at status **`Recorded`**, which is
+deliberately not `Failed`; nothing was attempted, so nothing failed.
+
+It is also the only mode available on a US long code that is not **10DLC-registered**. US carriers reject
+application-to-person traffic from unregistered numbers outright — `The sending number is not
+10DLC-registered but is required to be by the carrier` — and that applies to *sending* only, so receiving
+keeps working. Registering means a brand registration plus a campaign registration through the provider,
+with a one-off fee and monthly campaign charges; a sole proprietor can register without an EIN, on a
+lower throughput tier. Until that is done, sending from a US long code will fail whatever CallTree does.
+
+The settings page has a **Send as well as receive** switch beside the API key. Turning it off clears the
+key — the same "blank means unchanged" problem the outbound PIN has, and the same solution. It is *not*
+the same as turning `Messaging:Enabled` off, which stops messages arriving at all.
+
+**Sending.** Text your DID from your mobile with the recipient on the front:
+
+```
+3055551234 Running ten minutes late
+(305) 555-1234 Running ten minutes late
++1 305 555 1234 Running ten minutes late
+```
+
+All three are read the same way. Ten digits (or eleven starting with `1`) ends the number, so a body that
+begins with digits — `305-555-1234 42 is the answer` — still sends `42 is the answer`. An international
+number written with `+` and spaces works too; the run of number-shaped words ends it.
+
+If a command cannot be read, or the provider refuses the send, CallTree texts you back saying why.
+Successful sends are not acknowledged — that would double the message count to tell you nothing new.
+
+**What it does not do**
+
+- **MMS attachments are never forwarded.** A picture texted to your DID is recorded and counted, and the
+  forwarded text says `[1 attachment, not forwarded]`, but the image itself stays with the provider.
+  Forwarding it would mean re-sending media URLs at MMS rates with a second set of failure modes.
+- **There is no sticky reply target.** Every outbound text needs the number on the front, including a
+  reply to something just forwarded to you.
+- **A failed forward cannot tell you it failed**, because the channel it would use is the one that just
+  failed. It is recorded and logged; the `/messages` page is where you would see it.
+
 ## Security
 
 An open SIP port is scanned continuously. A live deployment logged **276 rejected INVITEs in roughly 40
@@ -266,6 +354,15 @@ require deciding this first — but decide it before relying on the proxy dial s
 
 Also disable SIP ALG on your router if it has one; it rewrites SIP messages in flight and causes one-way
 audio that is very hard to diagnose.
+
+**The messaging webhook is the same shape of exposure, over HTTP.** `/api/messaging/telnyx` has to be
+reachable from the public internet, nothing else in this API authenticates anything, and a request that
+gets through makes CallTree send a text at your expense. The Ed25519 signature check is the whole door:
+`Messaging:RequireSignature` defaults to on, fails closed if no public key is configured, and rejects a
+request more than `Messaging:SignatureToleranceSeconds` old so a captured one cannot be replayed
+indefinitely. Turn it off only while pasting the key in, and turn it straight back on. Messages addressed
+to a number other than `Telephony:DidNumber` are dropped before a row is created, the same rule the SIP
+side applies to INVITEs.
 
 ## Deployment
 
@@ -299,7 +396,14 @@ The UI is at <http://localhost:5173/calls>, with `/status` and `/settings` along
 | Endpoint | Purpose |
 |---|---|
 | `GET /api/calls` | Paginated call log, most recent first |
-| `GET /api/config` | Effective Telephony and Trunk settings |
+| `GET /api/recordings` | Paginated recordings, searchable by name |
+| `GET /api/recordings/{id}` | One recording |
+| `PATCH /api/recordings/{id}` | Rename it |
+| `GET /api/recordings/{id}/audio` | Stream the WAV, with range support |
+| `GET /api/messages` | Paginated message log, filterable by source and status, searchable by body |
+| `GET /api/messages/capabilities` | Whether SMS is on and whether it can send. What the UI asks before offering a Messages link |
+| `POST /api/messaging/telnyx` | The provider webhook. Public, Ed25519-signed, 404 while messaging is off |
+| `GET /api/config` | Effective Telephony, Trunk and Messaging settings |
 | `PUT /api/config` | Save them to `Storage:ConfigFile` |
 | `GET /api/telephony/status` | Trunk registration state and the SIP stack's live view |
 | `GET /health` | Liveness |
@@ -339,6 +443,7 @@ CallTree/
 │   ├── CallTree.Application/      # Ports and use cases; call commands
 │   ├── CallTree.Infrastructure/   # EF Core + SQLite
 │   ├── CallTree.Telephony/        # SIPSorcery + NAudio; owns the SIP user agent
+│   ├── CallTree.Messaging/        # SMS: provider REST client, webhook verification, relay policy
 │   ├── CallTree.Api/              # ASP.NET Core host, DI wiring, /health
 │   └── CallTree.Tests/            # xUnit; pure logic only
 ├── CallTree.UI/                 # SvelteKit frontend (call log)
@@ -346,8 +451,11 @@ CallTree/
 └── tools/                       # Prompt generation
 ```
 
-Dependencies point inwards: `Api → {Telephony, Infrastructure} → Application → Domain`. The SIP user agent
-runs as a `BackgroundService` inside the API process, so one process serves both HTTP and SIP/RTP.
+Dependencies point inwards: `Api → {Telephony, Messaging, Infrastructure} → Application → Domain`. The SIP
+user agent runs as a `BackgroundService` inside the API process, so one process serves both HTTP and
+SIP/RTP. Telephony and Messaging are siblings and cannot see each other, so the two numbers they both need
+(`Telephony:DidNumber`, `Telephony:MyCellNumber`) live on `LineOptions` in Application — the configuration
+keys are unchanged, only the type that owns them is shared.
 
 ## Testing
 
@@ -357,9 +465,17 @@ dotnet test CallTree.Core/CallTree.Tests
 
 Unit tests cover what is genuinely pure logic: the call state machine, phone-number normalisation, the WAV
 parsing and timing maths, the G.711 decode (checked against NAudio's decoder for all 256 codes), the RTP
-reordering buffer, and the recorder's silence-fill and discontinuity handling. Telephony behaviour itself
-is validated by placing real calls — a short SIPSorcery console program makes a serviceable scripted
-caller for local end-to-end tests.
+reordering buffer, the recorder's silence-fill and discontinuity handling, the message state machine, the
+`{number} body` command parser, and the webhook signature check (against real Ed25519 signatures). Telephony
+behaviour itself is validated by placing real calls — a short SIPSorcery console program makes a serviceable
+scripted caller for local end-to-end tests.
+
+The messaging webhook can be exercised without a phone: run the API with `Trunk:Host` blank so the SIP
+stack stays idle, set `Messaging:PublicKey` to a key you hold, and POST a signed body to
+`/api/messaging/telnyx` — `openssl pkeyutl -sign -inkey ed.pem -rawin -in <file>` over `{timestamp}|{body}`
+produces a signature the verifier accepts. Leaving `Trunk:Host` set is a mistake worth avoiding: user
+secrets supply real credentials in development, and a second instance on the same credential takes the
+provider's registration binding away from the live one.
 
 ## Troubleshooting
 

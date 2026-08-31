@@ -80,7 +80,7 @@ public sealed record TrunkSettings
     public int RegistrationExpirySeconds { get; init; } = 120;
 }
 
-/// <summary>A settings save. Both sections are required: this is a replace, not a patch.</summary>
+/// <summary>A settings save. Every section is required: this is a replace, not a patch.</summary>
 public sealed record SettingsUpdate
 {
     [Required]
@@ -88,6 +88,9 @@ public sealed record SettingsUpdate
 
     [Required]
     public required TrunkSettings Trunk { get; init; }
+
+    [Required]
+    public required MessagingSettings Messaging { get; init; }
 
     /// <summary>
     /// The trunk password. Null or omitted leaves whatever is already configured alone, so the UI can
@@ -104,6 +107,12 @@ public sealed record SettingsUpdate
     [RegularExpression("^[0-9]*$", ErrorMessage = "The PIN must be digits only - it is keyed in on a phone.")]
     [StringLength(12)]
     public string? OutboundPin { get; init; }
+
+    /// <summary>
+    /// The messaging provider API key, handled exactly like <see cref="TrunkPassword"/>: null leaves it
+    /// alone, an empty string removes it. Never returned - only reported as set.
+    /// </summary>
+    public string? MessagingApiKey { get; init; }
 }
 
 /// <summary>The effective configuration, plus what the operator needs to know to trust it.</summary>
@@ -113,8 +122,16 @@ public sealed record SettingsResponse
 
     public required TrunkSettings Trunk { get; init; }
 
+    public required MessagingSettings Messaging { get; init; }
+
     /// <summary>Whether a trunk password is configured. The value itself is never sent.</summary>
     public required bool TrunkPasswordSet { get; init; }
+
+    /// <summary>
+    /// Whether a messaging API key is configured. The value itself is never sent. False means nothing
+    /// can be sent, however the rest of the messaging section reads.
+    /// </summary>
+    public required bool MessagingApiKeySet { get; init; }
 
     /// <summary>
     /// Whether the Outbound path is gated by a PIN. The value itself is never sent. False means caller
@@ -148,4 +165,44 @@ public sealed record SettingsResponse
     public required string ConfigFilePath { get; init; }
 
     public required bool ConfigFileExists { get; init; }
+}
+
+/// <summary>
+/// The subset of <c>MessagingOptions</c> the settings UI may change.
+/// </summary>
+/// <remarks>
+/// The API key is absent for the same reason the trunk password is: it is a credential, and the
+/// response reports only whether one is set. <c>PublicKey</c> is here in full because it is a *public*
+/// key — the operator copies it out of the provider's portal, and hiding it would only make it
+/// impossible to check against the portal without clearing and retyping it.
+/// </remarks>
+public sealed record MessagingSettings
+{
+    /// <summary>
+    /// Master switch. Off means the webhook answers 404 and nothing is ever sent, whatever else is set.
+    /// </summary>
+    public bool Enabled { get; init; }
+
+    /// <summary>The provider's Ed25519 webhook public key, base64 (32 bytes decoded).</summary>
+    public string PublicKey { get; init; } = "";
+
+    /// <summary>Only needed when the DID belongs to more than one messaging profile.</summary>
+    public string MessagingProfileId { get; init; } = "";
+
+    /// <summary>
+    /// Whether an unsigned or badly-signed webhook is refused. Leave on: the URL is public, there is no
+    /// other authentication, and reaching it is enough to make this instance send a text.
+    /// </summary>
+    public bool RequireSignature { get; init; } = true;
+
+    /// <summary>How far out of date a signed webhook may be, which bounds how long one stays replayable.</summary>
+    [Range(30, 3600)]
+    public int SignatureToleranceSeconds { get; init; } = 300;
+
+    /// <summary>Whether a send command that could not be carried out is answered with a text back.</summary>
+    public bool NotifyOnFailure { get; init; } = true;
+
+    /// <summary>Timeout for one call to the provider's API, from inside the webhook request.</summary>
+    [Range(1, 120)]
+    public int ApiTimeoutSeconds { get; init; } = 10;
 }

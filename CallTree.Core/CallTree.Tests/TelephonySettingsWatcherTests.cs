@@ -35,13 +35,14 @@ public class TelephonySettingsWatcherTests
     {
         var watcher = Started(new TelephonyOptions(), new TrunkOptions());
 
+        // The DID and the mobile are not here any more: they live on LineOptions, which the messaging
+        // layer shares, and neither has ever been startup-only.
         var candidate = new TelephonyOptions
         {
-            MyCellNumber = "+15550001111",
-            DidNumber = "+15550002222",
             TraceSip = true,
             ScreeningDigit = 2,
             ScreeningTimeoutSeconds = 30,
+            DialTimeoutSeconds = 40,
         };
 
         Assert.Empty(watcher.PendingRestartKeysFor(candidate, new TrunkOptions()));

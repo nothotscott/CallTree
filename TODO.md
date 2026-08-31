@@ -148,6 +148,49 @@ in full before touching `PacedRtpRelay`/`RunBridgeAsync`/`RunProxyDialAsync` aga
       from the RTP timestamp, and two legs have two unrelated RTP clocks with nothing to align them to.
       Confirmed by phone: both sides audible on their correct channel in the resulting recording.
 
+## Phase 9 — SMS ✅ (receiving validated; sending blocked by 10DLC registration, not by code)
+
+Texts on the same DID, classified by sender the way calls are classified by caller ID. This one does not
+touch SIP at all: the provider delivers by HTTPS webhook and accepts sends over its REST API, so it lives
+in its own `CallTree.Messaging` project alongside `CallTree.Telephony` rather than inside it.
+
+- [x] `Message` aggregate + `Relay` (`Received → Relaying → Relayed | Rejected | Failed`), with delivery
+      as a fact on the relay rather than a status on the message — same rule as `Recording` on a call.
+- [x] Inbound: record and forward to `Telephony:MyCellNumber` with the sender's number on the front.
+- [x] Outbound: `{RECIPIENT-NUMBER} Body of text` from the mobile, sent from the DID. `SmsCommand` parses
+      at whitespace boundaries with an ordered pair of stop rules — see the gotcha in CLAUDE.md before
+      touching it.
+- [x] Ed25519 webhook signature verification, failing closed, with a replay window.
+- [x] Idempotency on the provider's message id (unique index + check), because the webhook is retried.
+- [x] Delivery receipts (`message.sent` / `message.finalized`), which never walk a verdict backwards.
+- [x] `Messaging:` settings section, all of it live (no restart), with the API key write-only.
+- [x] `GET /api/messages` and a `/messages` page in the UI, with source/status filters and a body search.
+- [x] `LineOptions`: `Telephony:DidNumber` / `Telephony:MyCellNumber` moved to Application so Telephony
+      and Messaging can both read them without one referencing the other. Config keys unchanged.
+- [x] **Validated with real texts**, and the webhook exposed over HTTPS. Receiving works end to end.
+- [x] Receive-only mode. Sending is refused by the carrier (`The sending number is not 10DLC-registered
+      but is required to be by the carrier`), so a blank `Messaging:ApiKey` is now a first-class mode:
+      messages end at the new terminal `MessageStatus.Recorded` rather than `Failed`, and the UI hides
+      everything about relaying. See PROGRESS.md for why that status has to exist.
+- [x] UI follows what the line can do: the Messages nav link only appears when SMS is enabled, and the
+      Relayed/Source columns and their filters only when there is a key to send with
+      (`GET /api/messages/capabilities`).
+- [x] A **Send as well as receive** switch on the settings page, so an API key can be cleared from the UI
+      at all — "blank means unchanged" made that impossible before, the same gap the outbound PIN had.
+- [ ] **10DLC registration**, if outbound SMS is ever wanted. Brand + campaign registration through the
+      provider; one-off fee plus a monthly campaign charge, and a sole proprietor can register without an
+      EIN at a lower throughput tier. **No code work** — the send paths are written and tested; set
+      `Messaging:ApiKey` once the number is approved and they take over.
+- [ ] Forward MMS media rather than only counting it. Would mean re-sending the provider's media URLs at
+      MMS rates, with its own failure modes — deliberately out of scope for the first cut.
+- [ ] Consider a sticky reply target, so a reply to a forwarded message does not need the number typed
+      again. Rejected for now: it is invisible state that decides who a message goes to, and getting it
+      wrong sends the operator's text to the wrong person.
+- [ ] Message detail view / conversation threading in the UI. The list shows the received body and what
+      was relayed; there is no per-number thread.
+- [ ] Retention: message bodies are the most sensitive thing in the database after the recordings, and
+      nothing prunes them. Same open question as recording retention, below.
+
 ## Phase 6 — Trunk resilience
 
 - [ ] Registration resilience: backoff tuning and network-blip recovery. Registration state is now

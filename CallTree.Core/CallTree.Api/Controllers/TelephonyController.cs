@@ -1,5 +1,5 @@
 using CallTree.Api.Settings;
-using CallTree.Domain.ValueObjects;
+using CallTree.Application.Configuration;
 using CallTree.Telephony;
 using CallTree.Telephony.Audio;
 using CallTree.Telephony.Configuration;
@@ -19,6 +19,7 @@ public class TelephonyController(
     TelephonyStatus status,
     TelephonySettingsWatcher settingsWatcher,
     IOptionsMonitor<TelephonyOptions> telephonyOptions,
+    IOptionsMonitor<LineOptions> lineOptions,
     PromptLibrary prompts) : ControllerBase
 {
     /// <summary>Whether the trunk is registered, and everything needed to work out why it is not.</summary>
@@ -28,6 +29,7 @@ public class TelephonyController(
     {
         var snapshot = status.Current;
         var telephony = telephonyOptions.CurrentValue;
+        var line = lineOptions.CurrentValue;
 
         return Ok(new TelephonyStatusResponse
         {
@@ -47,8 +49,8 @@ public class TelephonyController(
             RtpPortRange = snapshot.RtpPortRange,
             // Read from configuration rather than the snapshot: both follow configuration live, so the
             // snapshot would go stale the moment either is changed from the settings page.
-            DidFilterActive = PhoneNumber.TryParse(telephony.DidNumber, out _),
-            CellNumberConfigured = PhoneNumber.TryParse(telephony.MyCellNumber, out _),
+            DidFilterActive = line.Did is not null,
+            CellNumberConfigured = line.MyCell is not null,
             TraceSipEnabled = telephony.TraceSip,
             PromptsRoot = prompts.Root,
             PromptsLoaded = prompts.Loaded,

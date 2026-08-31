@@ -4,6 +4,7 @@ using CallTree.Application;
 using CallTree.Application.Configuration;
 using CallTree.Infrastructure;
 using CallTree.Infrastructure.Persistence;
+using CallTree.Messaging;
 using CallTree.Telephony;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
@@ -36,6 +37,7 @@ namespace CallTree.Api
             builder.Services.AddApplication(builder.Configuration);
             builder.Services.AddInfrastructure(builder.Configuration);
             builder.Services.AddTelephony(builder.Configuration);
+            builder.Services.AddMessaging(builder.Configuration);
 
             var app = builder.Build();
 

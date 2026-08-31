@@ -11,6 +11,8 @@
     <ProjectReference Include="..\CallTree.Domain\CallTree.Domain.csproj" />
     <!-- For the pure WAV/timing logic in CallTree.Telephony.Audio. -->
     <ProjectReference Include="..\CallTree.Telephony\CallTree.Telephony.csproj" />
+    <!-- For the forwarding text arithmetic and the webhook signature check. No HTTP is made. -->
+    <ProjectReference Include="..\CallTree.Messaging\CallTree.Messaging.csproj" />
     <!-- For the timestamp value converter's format handling. No database is touched. -->
     <ProjectReference Include="..\CallTree.Infrastructure\CallTree.Infrastructure.csproj" />
     <!-- For the settings merge rules, which decide whether a saved trunk password survives. No host is started. -->

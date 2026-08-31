@@ -30,6 +30,7 @@ COPY CallTree.Core/CallTree.Domain/CallTree.Domain.csproj CallTree.Core/CallTree
 COPY CallTree.Core/CallTree.Application/CallTree.Application.csproj CallTree.Core/CallTree.Application/
 COPY CallTree.Core/CallTree.Infrastructure/CallTree.Infrastructure.csproj CallTree.Core/CallTree.Infrastructure/
 COPY CallTree.Core/CallTree.Telephony/CallTree.Telephony.csproj CallTree.Core/CallTree.Telephony/
+COPY CallTree.Core/CallTree.Messaging/CallTree.Messaging.csproj CallTree.Core/CallTree.Messaging/
 COPY CallTree.Core/CallTree.Api/CallTree.Api.csproj CallTree.Core/CallTree.Api/
 RUN dotnet restore CallTree.Core/CallTree.Api/CallTree.Api.csproj
 
@@ -62,9 +63,15 @@ COPY --from=ui /ui/build ./wwwroot
 # Program.EnsureDatabase does, but the mount has to be writable.
 VOLUME ["/data"]
 
-# The settings UI writes Telephony/Trunk configuration to Storage:ConfigFile. Pointing it into the
-# volume alongside the database and the recordings is what makes the volume the whole instance: move
-# it to another host and the trunk moves with it. Note it holds the trunk password in plain text.
+# The settings UI writes Telephony/Trunk/Messaging configuration to Storage:ConfigFile. Pointing it into
+# the volume alongside the database and the recordings is what makes the volume the whole instance: move
+# it to another host and the trunk moves with it. Note it holds the trunk password, the outbound PIN and
+# the messaging API key in plain text.
+#
+# SMS needs nothing added here: it reaches the provider outbound over HTTPS, and its webhook arrives on
+# the same 8080 the UI is served from. What it does need is a route to /api/messaging/telnyx from the
+# public internet - a TLS reverse proxy in front of this - which is a separate exposure from the SIP and
+# RTP forwards, and one the signature check is the only thing guarding. See the README.
 ENV ASPNETCORE_URLS=http://0.0.0.0:8080 \
     ConnectionStrings__CallTree="Data Source=/data/calltree.db" \
     Storage__RecordingsRoot=/data/recordings \

@@ -73,3 +73,20 @@ export function formatPhoneNumber(e164: string | null): string | null {
 	const nanp = /^\+1(\d{3})(\d{3})(\d{4})$/.exec(e164);
 	return nanp ? `(${nanp[1]}) ${nanp[2]}-${nanp[3]}` : e164;
 }
+
+const dateOnlyFormat = new Intl.DateTimeFormat(undefined, { dateStyle: 'medium' });
+const timeOnlyFormat = new Intl.DateTimeFormat(undefined, { timeStyle: 'short' });
+
+/**
+ * Date and time as two separate strings, for a table cell that stacks them.
+ *
+ * Seconds are dropped on purpose. They earn their place in the call log, where the question is often how
+ * long something took, and they are noise in the message log, where the question is which day a code
+ * arrived — and dropping them is most of what lets that column stop being the widest one on the row.
+ */
+export function formatDateParts(iso: string | null): { date: string; time: string } {
+	if (!iso) return { date: '—', time: '' };
+	const value = new Date(iso);
+	if (Number.isNaN(value.getTime())) return { date: '—', time: '' };
+	return { date: dateOnlyFormat.format(value), time: timeOnlyFormat.format(value) };
+}

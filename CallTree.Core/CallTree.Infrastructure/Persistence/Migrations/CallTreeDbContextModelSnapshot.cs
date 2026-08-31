@@ -146,6 +146,115 @@ namespace CallTree.Infrastructure.Persistence.Migrations
                     b.ToTable("Recording");
                 });
 
+            modelBuilder.Entity("CallTree.Domain.Messages.Message", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Body")
+                        .IsRequired()
+                        .HasMaxLength(1600)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("CompletedAt")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("FailureReason")
+                        .HasMaxLength(500)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("From")
+                        .IsRequired()
+                        .HasMaxLength(20)
+                        .HasColumnType("TEXT");
+
+                    b.Property<int>("MediaCount")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("ProviderMessageId")
+                        .IsRequired()
+                        .HasMaxLength(128)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("ReceivedAt")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Source")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Status")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("To")
+                        .IsRequired()
+                        .HasMaxLength(20)
+                        .HasColumnType("TEXT");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("ProviderMessageId")
+                        .IsUnique();
+
+                    b.HasIndex("ReceivedAt");
+
+                    b.HasIndex("Source");
+
+                    b.ToTable("Messages");
+                });
+
+            modelBuilder.Entity("CallTree.Domain.Messages.Relay", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Body")
+                        .IsRequired()
+                        .HasMaxLength(1600)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("CreatedAt")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Delivery")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("DeliveryChangedAt")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Error")
+                        .HasMaxLength(500)
+                        .HasColumnType("TEXT");
+
+                    b.Property<Guid?>("MessageId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("ProviderMessageId")
+                        .HasMaxLength(128)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Recipient")
+                        .IsRequired()
+                        .HasMaxLength(20)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("SentAt")
+                        .HasColumnType("TEXT");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("MessageId")
+                        .IsUnique();
+
+                    b.HasIndex("ProviderMessageId");
+
+                    b.ToTable("Relay");
+                });
+
             modelBuilder.Entity("CallTree.Domain.Calls.CallLeg", b =>
                 {
                     b.HasOne("CallTree.Domain.Calls.Call", null)
@@ -162,11 +271,24 @@ namespace CallTree.Infrastructure.Persistence.Migrations
                         .OnDelete(DeleteBehavior.Cascade);
                 });
 
+            modelBuilder.Entity("CallTree.Domain.Messages.Relay", b =>
+                {
+                    b.HasOne("CallTree.Domain.Messages.Message", null)
+                        .WithOne("Relay")
+                        .HasForeignKey("CallTree.Domain.Messages.Relay", "MessageId")
+                        .OnDelete(DeleteBehavior.Cascade);
+                });
+
             modelBuilder.Entity("CallTree.Domain.Calls.Call", b =>
                 {
                     b.Navigation("Legs");
 
                     b.Navigation("Recording");
+                });
+
+            modelBuilder.Entity("CallTree.Domain.Messages.Message", b =>
+                {
+                    b.Navigation("Relay");
                 });
 #pragma warning restore 612, 618
         }

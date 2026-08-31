@@ -73,6 +73,21 @@ services:
       # It applies without a restart, which is why it is better left to the UI than pinned here.
       # Telephony__TraceSip: "true"
 
+      # --- Messaging (SMS) ---
+      # Off by default. All of it is read per request, so the settings page is the better place to set
+      # it than here - pinning a key in the environment means the page can only report it as overridden.
+      #
+      # The webhook (POST /api/messaging/telnyx, on the same port as the UI) has to be reachable from
+      # the internet for this to work at all, which means a TLS reverse proxy in front of this service.
+      # That is a separate exposure from the SIP and RTP forwards, nothing else in this API
+      # authenticates anything, and a request that gets through makes this instance send a text at your
+      # expense - so Messaging__RequireSignature stays on and the provider's public key is not optional.
+      # Messaging__Enabled: "true"
+      # Messaging__ApiKey: CHANGEME
+      # Messaging__PublicKey: CHANGEME
+      # Messaging__MessagingProfileId: ""
+      # Messaging__RequireSignature: "true"
+
       # --- Logging ---
       Logging__LogLevel__Default: Information
       Logging__LogLevel__Microsoft.AspNetCore: Warning

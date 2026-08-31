@@ -30,12 +30,29 @@ export interface TrunkSettings {
 	registrationExpirySeconds: number;
 }
 
+/**
+ * SMS settings. `publicKey` is here in full because it is a *public* key — only `apiKey` is a
+ * credential, and like the other two it is write-only.
+ */
+export interface MessagingSettings {
+	enabled: boolean;
+	publicKey: string;
+	messagingProfileId: string;
+	requireSignature: boolean;
+	signatureToleranceSeconds: number;
+	notifyOnFailure: boolean;
+	apiTimeoutSeconds: number;
+}
+
 export interface SettingsResponse {
 	telephony: TelephonySettings;
 	trunk: TrunkSettings;
+	messaging: MessagingSettings;
 	trunkPasswordSet: boolean;
 	/** Whether the outbound path is gated by a PIN. False means caller ID alone decides. */
 	outboundPinSet: boolean;
+	/** Whether a messaging API key is configured. False means nothing can be sent. */
+	messagingApiKeySet: boolean;
 	trunkConfigured: boolean;
 	/** Startup-only settings that have changed since the SIP stack started. */
 	pendingRestartKeys: string[];
@@ -50,9 +67,12 @@ export interface SettingsResponse {
 export interface SettingsUpdate {
 	telephony: TelephonySettings;
 	trunk: TrunkSettings;
+	messaging: MessagingSettings;
 	trunkPassword?: string | null;
 	/** Null leaves the PIN alone; an empty string turns the gate off. */
 	outboundPin?: string | null;
+	/** Null leaves the messaging API key alone; an empty string removes it. */
+	messagingApiKey?: string | null;
 }
 
 /** Validation errors keyed by the property path the API reports, e.g. `Trunk.Port`. */

@@ -60,16 +60,33 @@ returns its `clearInterval` — without that cleanup the timer survives navigati
 keeps the last good reading when a poll fails rather than blanking the page, since a status page that
 goes empty on one dropped request is worse than one that says "last refresh failed".
 
+**`$lib/messaging.svelte.ts` is the one piece of cross-route state here, and it is deliberate.**
+Everything else lives in the URL or in a `load` function. This holds what SMS can do (`enabled`,
+`canSend`), because two unrelated places need it: the root layout, which omits the Messages nav link
+entirely when SMS is off, and `/messages`, which drops the Source and Relayed columns and their filters
+when there is no API key to send with. `+layout.ts` seeds it from `GET /api/messages/capabilities` — safe
+to write a module-level store from a load function _only_ because `ssr = false`, so this runs in one
+browser session with no request state to leak — and the settings page updates it after a save.
+
+That update comes from the PUT **response**, never from re-reading the API, for the same reason the PIN
+switch does: the API writes `Storage:ConfigFile` and the options monitor reloads it asynchronously, so a
+read issued right after a save can still describe the configuration as it was before. A failed
+capabilities fetch is treated as "messaging off" rather than thrown — losing a nav link beats every page
+in the app failing to load because one optional feature could not be asked about.
+
 The settings page (`/settings`) is the one place that writes:
 
 - **Two secrets are write-only**, the trunk password and the outbound PIN. The API never sends either,
   only `trunkPasswordSet` / `outboundPinSet`. Send `null` when the field is blank — an empty string would
   be written to the config file and would then override a value coming from user secrets or the
   environment.
-- **The PIN needs the switch as well as the field.** Because blank has to keep meaning "unchanged", an
-  empty string is the only way to say "remove the gate", and there is no way to type that. Hence the
-  "Require a PIN" checkbox: unchecked sends `''`. And after a save the switch is set from what was
-  _sent_, never from the response — when the PIN was not part of the save, the response can still
+- **Two secrets need a switch as well as a field**, the PIN and the messaging API key. Because blank has
+  to keep meaning "unchanged", an empty string is the only way to say "remove it", and there is no way to
+  type that. Hence "Require a PIN" and "Send as well as receive": unchecked sends `''`. The API key's
+  switch is not redundant with "Enable SMS" — that turns the webhook off so nothing arrives at all, where
+  clearing the key leaves a receive-only line that still records every text to the DID, which is the only
+  way to run a US long code that is not 10DLC-registered. And after a save each switch is set from what
+  was _sent_, never from the response — when the PIN was not part of the save, the response can still
   describe the pre-save configuration, because the file the API just wrote reloads asynchronously.
   Adopting that would flip the switch off on its own, and the next save would then genuinely clear the
   PIN on the path that answers automatically and records.

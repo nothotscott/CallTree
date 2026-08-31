@@ -17,6 +17,8 @@ public static class DependencyInjection
         services.AddScoped<ICallRepository, CallRepository>();
         services.AddScoped<ICallQueries, CallQueries>();
         services.AddScoped<IRecordingQueries, RecordingQueries>();
+        services.AddScoped<IMessageRepository, MessageRepository>();
+        services.AddScoped<IMessageQueries, MessageQueries>();
 
         return services;
     }

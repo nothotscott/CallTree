@@ -638,6 +638,156 @@ yet — there is no API to read from until Phase 7.
 - Transitive packages with known advisories are pinned to patched versions.
 - `dotnet-ef` is installed via the `dotnet-tools.json` manifest.
 
+## Phase 9 — SMS ✅ (receiving validated by real texts; sending blocked by 10DLC, not by code)
+
+Texts on the same DID, in the same two classifications calls use — Inbound (a stranger, forwarded to
+`Telephony:MyCellNumber`) and Outbound (a `{RECIPIENT-NUMBER} Body of text` command from the mobile, sent
+from the DID). The naming note carries over exactly: both kinds arrive as an *inbound* message on the
+provider's webhook, so `MessageSource` is a business classification, not a direction on the wire.
+
+**This is the first part of CallTree that is not SIP.** The provider delivers messages by HTTPS webhook
+and accepts sends over a REST API; nothing here touches the trunk, the SIP port or SIPSorcery. It
+therefore went into a new `CallTree.Messaging` project rather than into `CallTree.Telephony` — a sibling,
+not a child, and the two must not reference each other.
+
+**Shape, and why:**
+
+- `Message` (aggregate) + `Relay` (entity). `Received → Relaying → Relayed | Rejected | Failed`. Delivery
+  is a fact on the `Relay`, never a `MessageStatus`, for the same reason `Recording` is a fact on a call —
+  and `Message.RecordDelivery` touches only the relay, the same discipline `FinalizeRecording` follows, so
+  a receipt arriving minutes later in its own scope cannot overwrite the parent with a stale status.
+- `Rejected` and `Failed` are kept apart deliberately: rejected means nothing was ever sent (an unreadable
+  command, no mobile configured), failed means the provider turned the send down. Only one of them is the
+  operator's typo.
+- `SmsRelayService` (Messaging) owns the policy; `MessageLifecycleService` (Application) owns the
+  transitions. That mirrors `TelephonyBackgroundService`/`CallLifecycleService` — except that every
+  message write arrives on an HTTP webhook, which already has a DI scope, so it goes direct rather than
+  through `ICallCommands`. That is the `RecordingService` precedent.
+
+**The layering decision worth knowing about.** Messaging needs `Telephony:DidNumber` and
+`Telephony:MyCellNumber` — to classify a sender, to filter webhooks, and as the `From` on everything it
+sends — and Telephony needs the same two. Binding the `Telephony` section into a second options type would
+have put one setting in two places, the exact trap `Telephony:TraceSip` used to be in. So the two keys
+moved off `TelephonyOptions` onto a new `LineOptions` in Application, bound in `AddApplication` from the
+`Telephony` section: the section is shared between two types, no key is, and **every existing
+`config.json`, environment variable and deployment note keeps working unchanged**. The settings DTO the UI
+sees is unchanged too; `SettingsDocument` now assembles that half of the form from both types.
+
+**Security, which is the interesting part.** The webhook is the only endpoint in this API meant to be
+publicly reachable, nothing else in front of it authenticates anything, and a request that gets through
+makes the instance send a text at the operator's expense — the messaging twin of the toll-fraud exposure
+`Telephony:DidNumber` closes on the SIP port. So:
+
+- Ed25519 signature verification over `{telnyx-timestamp}|{raw body}`, **failing closed**: no public key
+  configured means every request is refused, rather than quietly accepting unsigned traffic while setup is
+  unfinished. The controller reads the raw body as a string and hands the same string to the verifier and
+  the parser — model-binding and re-serializing changes whitespace and key order and nothing would verify.
+- A replay window (`Messaging:SignatureToleranceSeconds`, 300s), checked before the signature, since a
+  replayed request carries a perfectly valid one.
+- The same DID filter the SIP side applies: a message addressed to a number that is not ours is dropped
+  before a row exists.
+- BouncyCastle, because **.NET 10 still has no standalone Ed25519** — the only occurrence in
+  `System.Security.Cryptography` is inside the Composite ML-DSA algorithm identifiers. It is already in
+  the graph via SIPSorcery's DTLS-SRTP, but Messaging references it directly since it cannot reference
+  Telephony.
+
+**Idempotency.** The provider retries on any non-2xx *and* on a slow response, and a retried inbound
+message means a second forward — money, and a second buzz on the phone. `ProviderMessageId` is uniquely
+indexed and checked before insert; anything understood answers 200, including duplicates and events we do
+not act on, so only an unreadable body (400) is ever retried. The unique index is the backstop for two
+retries genuinely in flight at once: that write fails, the request 500s, and the next retry finds the row.
+
+**The command parser is the part most likely to be "simplified" wrongly later.** `SmsCommand` reads the
+recipient a whitespace-delimited token at a time, because a number may contain spaces *and* be followed by
+a body that starts with digits. Two stop rules, in order: a canonical NANP length (10 digits, or 11
+starting with 1) ends it immediately whatever follows, and otherwise the end of the run of number-shaped
+tokens ends it. Scanning for the first substring that parses is the obvious shortcut and it is wrong —
+`PhoneNumber.TryParse` happily accepts `+1305555123`, so that approach cuts `+13055551234` short and texts
+a stranger. A non-NANP `+` number followed by a numeric first body word is left ambiguous on purpose: it
+fails loudly rather than sending to the wrong number.
+
+**Deliberately not done**, and each is a decision rather than an oversight:
+
+- MMS media is counted and noted in the forwarded text, never fetched or forwarded.
+- No sticky reply target — every send needs the number on the front, including a reply to something just
+  forwarded. Invisible state that decides who a message goes to is not worth the convenience.
+- Failure notices go back to the mobile only for send commands, and only on failure. There is none on the
+  inbound-forward failure path, because the channel a notice would use is the one that just failed. The
+  notice is also not recorded as a `Relay` — nothing was relayed — so receipts for it find nothing and are
+  ignored, which is ordinary.
+
+**What was actually verified, and what was not.** Exercised end to end against a running instance with
+real openssl-generated Ed25519 signatures: inbound forward, send command parsing and dispatch, an
+unreadable command landing in `Rejected` with the usage text, a duplicate webhook ignored, a message for
+someone else's number dropped, a tampered signature and a 10-minute-stale replay both refused with 403, a
+malformed body 400, and delivery receipts moving a relay `Queued → Sent → Delivered` without a late
+out-of-order receipt walking it back or touching the parent. The provider's REST API was reached for real
+and refused the send only on a deliberately fake API key, which confirms the endpoint and request shape.
+**Since validated by the operator with real texts**, which is what turned up the one thing no amount of
+local testing could — see below.
+
+### 10DLC, and why the feature now has a receive-only mode
+
+Real texts confirmed the whole receiving half. Sending came back from Telnyx as:
+
+> The sending number is not 10DLC-registered but is required to be by the carrier.
+
+US carriers require application-to-person traffic on a long code to be registered under 10DLC — a brand
+registration plus a campaign registration through the provider, with a one-off fee and a monthly campaign
+charge (a sole proprietor can register without an EIN, at a lower throughput tier). It gates *sending*
+only; receiving on an unregistered number works normally. **No code change can work around it**, so this
+is not a bug to debug, and the operator's call was to run the DID receive-only for now.
+
+That made a mode out of what had been an edge case, and the edge case was ugly. `Messaging:Enabled` with
+a blank `Messaging:ApiKey` already "worked": `TelnyxClient` refuses politely with "Messaging:ApiKey is not
+set", the relay is marked failed, and the message ends at `Failed`. Which means **every text the operator
+ever receives** would sit in the log as a red failure with a configuration note against it — a log that
+is entirely red is a log nobody reads, and the 2FA code the operator actually came to read is buried in
+it.
+
+So `SmsRelayService.ReceiveOnlyAsync` now short-circuits before any relay is attempted:
+
+- An inbound text ends at the new terminal `MessageStatus.Recorded` — no relay row, and no
+  `FailureReason`, because nothing failed and *why* this line does not send is a property of the
+  configuration rather than a fact about the message. It is stated once, in a banner on `/messages`.
+- A send command ends at `Rejected` with a reason: the operator asked for something the line cannot do
+  and the row has to say so. No failure notice — sending one would need the very key that is missing.
+
+`Recorded` is deliberately neither `Received` (which is non-terminal; a key added later must not
+retroactively forward month-old texts) nor `Rejected` (nothing was rejected). The `ConfigController`
+warning about a missing key was demoted to Information for the same reason: it is a supported mode.
+
+### UI: telling the operator what the line can actually do
+
+`GET /api/messages/capabilities` returns two booleans, `enabled` and `canSend`. Both are derivable from
+`/api/config`, and it got its own endpoint anyway — `/api/config` is the settings page's write model,
+carrying the config file path, environment overrides and pending-restart keys, and it is the response for
+the one endpoint that can point the trunk somewhere else. Having the root layout fetch all of that on
+every page load to decide whether one nav link is worth showing would be the wrong coupling.
+
+The frontend keeps it in `$lib/messaging.svelte.ts`, the only cross-route state in the app. `+layout.ts`
+seeds it (safe to write a module-level store from a load function *only* because `ssr = false`), and the
+settings page updates it from the PUT **response** after a save rather than re-reading the API — the same
+asynchronous-reload trap the PIN switch documents. With that:
+
+- The **Messages** nav link only appears when SMS is enabled.
+- `/messages` drops the **Relayed** column, the **Source** column and the Source filter when the line
+  cannot send, restricts the Status filter to the three statuses reachable without a key, and explains
+  receive-only mode once in a banner instead of on every row. Source moved onto the From cell as a "your
+  mobile" sub-label, which is the only case worth flagging; the message body took the reclaimed width,
+  which is the point of the page.
+- Settings gained a **Send as well as receive** switch beside the API key. This was previously
+  impossible to express: blank means "unchanged" (the trunk-password rule), so there was no way to
+  *clear* a key and go receive-only from the UI at all. It follows the outbound PIN's pattern exactly,
+  including setting the switch from what was sent rather than from the response. It is not redundant with
+  "Enable SMS", which turns the webhook off so nothing arrives at all.
+
+**Gotcha found while testing this, worth more than the feature.** A `dotnet run` started only to poke an
+HTTP endpoint picked up the real trunk credentials from user secrets and registered with the live trunk,
+which per the existing note takes the provider's binding away from the deployed instance. Set
+`Trunk__Host=""` for any local run that is not about telephony — a blank host makes
+`TrunkOptions.IsConfigured` false and the hosted service returns before it opens a socket.
+
 ## Validation status
 
 - Phase 0: validated (build, tests, boot, migration, `/health`).
@@ -654,4 +804,17 @@ yet — there is no API to read from until Phase 7.
   dedicated Known Issue section above before touching the relay code again.
 - Configuration layering, hot reload, the password merge rules and the restart-required reporting:
   verified against a running instance, not just unit-tested.
-- Unit tests: 129 passing.
+- Phase 9 (SMS): **receiving validated by real texts.** The webhook, the signature check and the message
+  log all work against a publicly exposed instance. **Sending is refused by the carrier, not by CallTree**
+  — `The sending number is not 10DLC-registered but is required to be by the carrier` — so the DID now
+  runs receive-only. Everything else was verified against a running instance with real signed webhooks:
+  inbound forward, send-command parsing, rejection and duplicate handling, the DID filter,
+  signature/replay refusal, delivery receipts, and the settings round trip. The relay paths stay unproven
+  only in the sense that no carrier has ever accepted one; the request shape reached the provider's API
+  for real. See the Phase 9 section above.
+- Receive-only mode (`Messaging:Enabled`, blank `Messaging:ApiKey`): verified against a running instance —
+  an inbound text ends at `Recorded` with no failure reason and no relay row, a send command ends at
+  `Rejected` with a reason and no notice attempt, the new status round-trips through the `status` filter,
+  and `/api/messages/capabilities` reports `{"enabled":true,"canSend":false}`. Adding a key and restarting
+  flips it to `canSend:true` and the inbound path relays again, unchanged.
+- Unit tests: 224 passing.

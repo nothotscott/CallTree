@@ -1,15 +1,21 @@
 namespace CallTree.Telephony.Configuration;
 
 /// <remarks>
+/// <para>
 /// A record for the same reason as <see cref="TrunkOptions"/>: value equality and <c>with</c> are what
 /// <see cref="TelephonySettingsWatcher"/> and the settings endpoint are built on.
+/// </para>
+/// <para>
+/// <c>Telephony:DidNumber</c> and <c>Telephony:MyCellNumber</c> are in the same configuration section
+/// but deliberately not on this type: the messaging layer reads them too, and it is a sibling of this
+/// one. They live on <c>LineOptions</c> in Application, which is the only place either layer can see.
+/// Do not add them back here - binding one key into two options types is the trap <c>Telephony:TraceSip</c>
+/// used to be in.
+/// </para>
 /// </remarks>
 public sealed record TelephonyOptions
 {
     public const string SectionName = "Telephony";
-
-    /// <summary>My cell number; inbound calls matching this caller ID are classified as CallSource.Outbound.</summary>
-    public string MyCellNumber { get; init; } = "";
 
     public int SipListenPort { get; init; } = 5060;
 
@@ -33,14 +39,6 @@ public sealed record TelephonyOptions
     /// </summary>
     public bool TraceSip { get; init; }
 
-    /// <summary>
-    /// The DID this instance owns. Inbound INVITEs addressed to anything else are rejected with 404
-    /// before a Call row is created — an open SIP port attracts constant dial-plan probing for toll
-    /// fraud, and answering those calls both confirms a live PBX and fills the database with junk.
-    /// Leave blank to accept any request URI (the pre-Phase-2 behaviour).
-    /// </summary>
-    public string DidNumber { get; init; } = "";
-
     /// <summary>Directory holding the IVR prompt WAVs (8 or 16 kHz, 16-bit, mono PCM).</summary>
     public string PromptsRoot { get; init; } = "prompts";
 
@@ -54,7 +52,7 @@ public sealed record TelephonyOptions
     public int ScreeningTimeoutSeconds { get; init; } = 12;
 
     /// <summary>
-    /// How long to let the outbound leg to <see cref="MyCellNumber"/> ring before giving up and telling
+    /// How long to let the outbound leg to the operator's mobile ring before giving up and telling
     /// the caller nobody picked up. Read per dial attempt, like <see cref="ScreeningTimeoutSeconds"/>.
     /// </summary>
     public int DialTimeoutSeconds { get; init; } = 25;

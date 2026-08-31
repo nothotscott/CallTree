@@ -1,4 +1,6 @@
 using System.Text.Json.Nodes;
+using CallTree.Application.Configuration;
+using CallTree.Messaging.Configuration;
 using CallTree.Telephony.Configuration;
 
 namespace CallTree.Api.Settings;
@@ -9,17 +11,22 @@ namespace CallTree.Api.Settings;
 /// <remarks>
 /// Kept free of file and container access so the merge rules — which decide whether a saved trunk
 /// password survives — can be tested directly.
+///
+/// Note the <c>Telephony</c> section is written from two options types: <see cref="TelephonyOptions"/>
+/// for the SIP settings and <see cref="LineOptions"/> for the DID and the mobile, which the messaging
+/// layer needs too. The keys on disk are unchanged; only the type that owns two of them moved.
 /// </remarks>
 public static class SettingsDocument
 {
     private const string TelephonySection = TelephonyOptions.SectionName;
     private const string TrunkSection = TrunkOptions.SectionName;
+    private const string MessagingSection = MessagingOptions.SectionName;
 
     /// <summary>Every configuration key this endpoint writes, in the form the config system uses.</summary>
     public static readonly IReadOnlyList<string> ManagedKeys =
     [
-        $"{TelephonySection}:{nameof(TelephonyOptions.MyCellNumber)}",
-        $"{TelephonySection}:{nameof(TelephonyOptions.DidNumber)}",
+        $"{TelephonySection}:{nameof(LineOptions.MyCellNumber)}",
+        $"{TelephonySection}:{nameof(LineOptions.DidNumber)}",
         $"{TelephonySection}:{nameof(TelephonyOptions.PublicHost)}",
         $"{TelephonySection}:{nameof(TelephonyOptions.SipListenPort)}",
         $"{TelephonySection}:{nameof(TelephonyOptions.ListenOnTcp)}",
@@ -38,12 +45,24 @@ public static class SettingsDocument
         $"{TrunkSection}:{nameof(TrunkOptions.AuthUsername)}",
         $"{TrunkSection}:{nameof(TrunkOptions.Password)}",
         $"{TrunkSection}:{nameof(TrunkOptions.RegistrationExpirySeconds)}",
+        $"{MessagingSection}:{nameof(MessagingOptions.Enabled)}",
+        $"{MessagingSection}:{nameof(MessagingOptions.ApiKey)}",
+        $"{MessagingSection}:{nameof(MessagingOptions.PublicKey)}",
+        $"{MessagingSection}:{nameof(MessagingOptions.MessagingProfileId)}",
+        $"{MessagingSection}:{nameof(MessagingOptions.RequireSignature)}",
+        $"{MessagingSection}:{nameof(MessagingOptions.SignatureToleranceSeconds)}",
+        $"{MessagingSection}:{nameof(MessagingOptions.NotifyOnFailure)}",
+        $"{MessagingSection}:{nameof(MessagingOptions.ApiTimeoutSeconds)}",
     ];
 
-    public static TelephonySettings ToSettings(TelephonyOptions options) => new()
+    /// <summary>
+    /// The telephony half of the form, assembled from both types that own part of the section. The DTO
+    /// deliberately keeps the shape the UI has always seen.
+    /// </summary>
+    public static TelephonySettings ToSettings(TelephonyOptions options, LineOptions line) => new()
     {
-        MyCellNumber = options.MyCellNumber,
-        DidNumber = options.DidNumber,
+        MyCellNumber = line.MyCellNumber,
+        DidNumber = line.DidNumber,
         PublicHost = options.PublicHost,
         SipListenPort = options.SipListenPort,
         ListenOnTcp = options.ListenOnTcp,
@@ -68,6 +87,19 @@ public static class SettingsDocument
         RegistrationExpirySeconds = options.RegistrationExpirySeconds,
     };
 
+    public static MessagingSettings ToSettings(MessagingOptions options) => new()
+    {
+        Enabled = options.Enabled,
+        // The public key is not a credential and is returned in full, unlike ApiKey - see the remarks
+        // on MessagingSettings.
+        PublicKey = options.PublicKey,
+        MessagingProfileId = options.MessagingProfileId,
+        RequireSignature = options.RequireSignature,
+        SignatureToleranceSeconds = options.SignatureToleranceSeconds,
+        NotifyOnFailure = options.NotifyOnFailure,
+        ApiTimeoutSeconds = options.ApiTimeoutSeconds,
+    };
+
     /// <summary>
     /// Applies the editable fields to the current options, leaving the rest as they are. Used to ask
     /// the settings watcher whether a save will need a restart, before it is written.
@@ -77,8 +109,6 @@ public static class SettingsDocument
         OutboundPin = outboundPin ?? current.OutboundPin,
         JitterBufferMilliseconds = settings.JitterBufferMilliseconds,
         RecordingToneIntervalSeconds = settings.RecordingToneIntervalSeconds,
-        MyCellNumber = settings.MyCellNumber,
-        DidNumber = settings.DidNumber,
         PublicHost = settings.PublicHost,
         SipListenPort = settings.SipListenPort,
         ListenOnTcp = settings.ListenOnTcp,
@@ -88,6 +118,13 @@ public static class SettingsDocument
         ScreeningDigit = settings.ScreeningDigit,
         ScreeningTimeoutSeconds = settings.ScreeningTimeoutSeconds,
         DialTimeoutSeconds = settings.DialTimeoutSeconds,
+    };
+
+    /// <summary>The other half of the same section: the two numbers the messaging layer shares.</summary>
+    public static LineOptions Apply(LineOptions current, TelephonySettings settings) => current with
+    {
+        MyCellNumber = settings.MyCellNumber,
+        DidNumber = settings.DidNumber,
     };
 
     public static TrunkOptions Apply(TrunkOptions current, TrunkSettings settings, string? password) => current with
@@ -100,6 +137,19 @@ public static class SettingsDocument
         Password = password ?? current.Password,
     };
 
+    public static MessagingOptions Apply(MessagingOptions current, MessagingSettings settings, string? apiKey) => current with
+    {
+        Enabled = settings.Enabled,
+        // Same rule as the trunk password: null means unchanged.
+        ApiKey = apiKey ?? current.ApiKey,
+        PublicKey = settings.PublicKey,
+        MessagingProfileId = settings.MessagingProfileId,
+        RequireSignature = settings.RequireSignature,
+        SignatureToleranceSeconds = settings.SignatureToleranceSeconds,
+        NotifyOnFailure = settings.NotifyOnFailure,
+        ApiTimeoutSeconds = settings.ApiTimeoutSeconds,
+    };
+
     /// <summary>
     /// Writes the managed keys into an existing config document, in place. Anything else already in
     /// the file is left untouched — the file is the operator's, not this endpoint's.
@@ -107,8 +157,8 @@ public static class SettingsDocument
     public static JsonObject Apply(JsonObject document, SettingsUpdate update)
     {
         var telephony = Section(document, TelephonySection);
-        telephony[nameof(TelephonyOptions.MyCellNumber)] = update.Telephony.MyCellNumber;
-        telephony[nameof(TelephonyOptions.DidNumber)] = update.Telephony.DidNumber;
+        telephony[nameof(LineOptions.MyCellNumber)] = update.Telephony.MyCellNumber;
+        telephony[nameof(LineOptions.DidNumber)] = update.Telephony.DidNumber;
         telephony[nameof(TelephonyOptions.PublicHost)] = update.Telephony.PublicHost;
         telephony[nameof(TelephonyOptions.SipListenPort)] = update.Telephony.SipListenPort;
         telephony[nameof(TelephonyOptions.ListenOnTcp)] = update.Telephony.ListenOnTcp;
@@ -152,6 +202,22 @@ public static class SettingsDocument
         if (update.TrunkPassword is not null)
         {
             trunk[nameof(TrunkOptions.Password)] = update.TrunkPassword;
+        }
+
+        var messaging = Section(document, MessagingSection);
+        messaging[nameof(MessagingOptions.Enabled)] = update.Messaging.Enabled;
+        messaging[nameof(MessagingOptions.PublicKey)] = update.Messaging.PublicKey;
+        messaging[nameof(MessagingOptions.MessagingProfileId)] = update.Messaging.MessagingProfileId;
+        messaging[nameof(MessagingOptions.RequireSignature)] = update.Messaging.RequireSignature;
+        messaging[nameof(MessagingOptions.SignatureToleranceSeconds)] = update.Messaging.SignatureToleranceSeconds;
+        messaging[nameof(MessagingOptions.NotifyOnFailure)] = update.Messaging.NotifyOnFailure;
+        messaging[nameof(MessagingOptions.ApiTimeoutSeconds)] = update.Messaging.ApiTimeoutSeconds;
+
+        // A credential, so the same rule again: absent means unchanged, and a save of an unrelated
+        // field must not blank a key that came from the environment or user secrets.
+        if (update.MessagingApiKey is not null)
+        {
+            messaging[nameof(MessagingOptions.ApiKey)] = update.MessagingApiKey;
         }
 
         return document;

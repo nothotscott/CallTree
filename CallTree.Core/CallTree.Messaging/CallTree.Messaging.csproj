@@ -1,0 +1,25 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\CallTree.Application\CallTree.Application.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Ed25519 webhook signature verification. .NET 10 still has no standalone Ed25519 - the only
+         mention in System.Security.Cryptography is inside the Composite ML-DSA algorithm identifiers -
+         so this is the dependency, not a convenience. It is already in the app's graph via SIPSorcery
+         (which uses it for DTLS-SRTP), but referenced directly here because this project uses it
+         directly and does not reference Telephony. -->
+    <PackageReference Include="BouncyCastle.Cryptography" Version="2.6.2" />
+    <PackageReference Include="Microsoft.Extensions.Http" Version="10.0.10" />
+    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.10" />
+    <PackageReference Include="Microsoft.Extensions.Options.ConfigurationExtensions" Version="10.0.10" />
+  </ItemGroup>
+
+</Project>
