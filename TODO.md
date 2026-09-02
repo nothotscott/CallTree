@@ -8,18 +8,12 @@ that history. What's left is grouped by topic instead.
 
 ## Security
 
-- [ ] Restrict the router's port-forwards by source address — the cheaper layer, since it drops probes
-      before they reach the host at all. Importable lists are in [`deploy/firewall/`](deploy/firewall/).
-      The probes bypass the trunk entirely (sent straight to the public IP on 5060), so no provider-side
-      account setting can stop them.
-- [ ] Optionally mirror that allowlist in `HandleIncomingCallAsync` as defence in depth, for whenever the
+- [ ] Optionally mirror the router level allowlist in [`deploy/firewall/`](deploy/firewall/) to `HandleIncomingCallAsync` as defence in depth, for whenever the
       forward gets widened or the host moves.
-- [ ] Consider rate-limiting or temporarily blocklisting sources that are repeatedly rejected — probes
-      arrive in bursts and each one still costs a SIP transaction.
 - [ ] Decide the API's auth posture: LAN-only, or authenticated remote access. There is currently no auth
       and no CORS policy. `GET /api/config` discloses the DID, mobile number, public host and trunk
       username, and `PUT` can repoint the trunk or clear the DID filter that keeps toll-fraud probes out —
-      this is the strongest argument for auth, and it should land before any remote exposure.
+      this is the strongest argument for auth, and it should land before any remote exposure. It's currently recommended to use Cloudflare Zero Trust for public access.
 
 ## Trunk and calls
 
@@ -83,20 +77,12 @@ that history. What's left is grouped by topic instead.
 
 ## Future
 
-Bigger, more speculative pieces — not scoped yet, just worth keeping on the list.
-
-- [ ] Text-to-speech prompts generated on the fly (Ollama, or the Responses API) instead of static
+- [ ] Text-to-speech prompts generated on the fly instead of static
       `.wav` files under `CallTree.Api/prompts/`. Would let prompt wording change without regenerating and
       redeploying audio files — see [Prompts](README.md#prompts) for how that works today.
+- [ ] Responses API / Ollama integration for LLMs to handle spam prevention.
 - [ ] A softphone in the web UI: a dialer with live audio, so a call can be placed and heard from the
       browser instead of only from a phone on the trunk. `PlaceOutboundLegAsync` (see PROGRESS.md) was
       already extracted as trigger-agnostic dial primitive with this in mind.
 - [ ] SMS sending from the web UI, once 10DLC registration (above) clears — compose and send a text from
       `/messages` instead of only via the `{RECIPIENT-NUMBER} Body of text` command from the mobile.
-
-## Open decisions
-
-1. **Outbound-path authentication**: caller-ID match only, or caller ID plus a PIN. Both are supported
-   (`Telephony:OutboundPin`, blank by default), so this is a configuration decision rather than a build
-   one. A PIN is the safer default given how easily caller ID is spoofed, and it matters more now that the
-   outbound proxy dial can place a real call to whatever number the caller enters.

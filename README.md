@@ -47,11 +47,6 @@ One number; every call to or from it passes through CallTree, which classifies e
   turns away most automated spam. Once past the gate the call is bridged to your mobile and recorded in
   stereo, one leg per channel.
 
-Both start life as inbound SIP INVITEs — `Outbound`/`Inbound` describe the *business* meaning, while
-`LegDirection` describes the SIP-level direction of an individual leg. The names come from where the
-project started: recording the operator's own outgoing calls came first, everyone-else screening and
-bridging came after, and the two `CallSource` names still reflect that history rather than a coin flip.
-
 **Text messages work the same way**, classified by the sender's number rather than the caller ID:
 
 - **`MessageSource.Inbound`** — anyone else texting your DID. The message is recorded and forwarded to
