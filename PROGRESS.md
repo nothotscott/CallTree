@@ -291,7 +291,7 @@ plays up to the last flush.
 - `Telephony:DialTimeoutSeconds` is wired through the same settings stack as every other numeric Telephony
   setting (options, the settings DTOs, the config-file merge, the `/settings` UI field).
 
-## Phase 4 addendum — Outbound proxy dial ⚠️ (functionally validated; audio-quality fix pending re-validation)
+## Phase 4 addendum — Outbound proxy dial ✅ (validated by phone)
 
 A self-hosted outbound calling proxy on the Outbound-source path: while on a call from `MyCellNumber`
 (already answered, already recording), dialing `*{NUMBER}#` places a *new* leg from the DID to `{NUMBER}`,
@@ -358,7 +358,7 @@ timeout setting: bounded only by the call's own hangup. Deliberately **not** run
 already connected, so DTMF meant for the proxy-dialed party (navigating their own phone menu) is never
 mistaken for a new dial attempt — matches Phase 4's own DTMF-passthrough non-goal.
 
-### Bring-up fault (partially fixed, see Known Issue below): the live relay was choppy, with lag that grew over the call
+### Bring-up fault (fixed in two stages, see "Fixed" below): the live relay was choppy, with lag that grew over the call
 
 First phone test of this addendum surfaced it, but the bug was actually in Phase 4's bridge too, copied
 into this feature along with the rest of the relay code: `RunBridgeAsync` and `RunProxyDialAsync` both
@@ -398,57 +398,44 @@ unaffected by any of this, which is about audio smoothness, not call control. No
 wall-clock pacing, which is exactly the category of thing this project's testing philosophy reserves for
 real phone calls rather than unit tests.
 
-### ⚠️ KNOWN ISSUE (open, deferred 2026-08-22): `PacedRtpRelay` helped but did not fully fix relay audio quality
+### Fixed (2026-08-28): the remaining chop/lag was two senders on one SSRC, not pacing or jitter depth
 
-**Do not assume this is closed.** The operator re-tested after the `PacedRtpRelay` fix above and confirmed
-Phase 4 and the Outbound-proxy addendum both work end to end (correctly connecting, disclosing, recording),
-and asked to mark both **done on that basis** — but reported the live call still shows *some* chop/lag on
-both bridging paths, and specifically flagged **the caller→`MyCellNumber` direction of the Inbound bridge
-(`RunBridgeAsync`'s `toInboundRelay`) as the worst of the affected legs**. Diagnosis was explicitly deferred
-to a future session rather than chased further in this one. Read this whole section before touching
-`PacedRtpRelay`/`RunBridgeAsync`/`RunProxyDialAsync`/`RtpJitterBuffer` again.
+`PacedRtpRelay` (above) measurably helped but the operator's re-test on 2026-08-22 still found chop/lag on
+both bridging paths, worst on the Inbound bridge's caller→`MyCellNumber` direction. That was tracked as an
+open known issue with several hypotheses to investigate (jitter-buffer depth, clock drift over a long call,
+asymmetric network paths). **None of those were the cause.** The real bug, found and fixed in
+[`5faf75a`](https://github.com/nothotscott/CallTree/commit/5faf75aa0590537917e868c477d5a7f79e2556b2):
 
-What is already ruled out or already fixed, so a future session doesn't redo this work:
+`VoIPMediaSession.Start` starts each leg's `AudioExtrasSource` background-silence timer unconditionally —
+a real 20ms timer sending real PCMU packets — and nothing had ever stopped it once a `PacedRtpRelay` also
+started calling `SendRtpRaw` directly on that same leg. Both share one SSRC and one sequence-number
+counter, so the far end received roughly 100 packets/second alternating between two unrelated RTP
+timestamp bases: the silence timer's own `LocalTrack.Timestamp`, and the relayed leg's clock carried
+through by the relay, with every second packet silence. A receiver scheduling playout from those
+timestamps has no consistent timeline to work from, and RTCP sender reports alternate bases too, since
+they echo whichever packet went out last. That is exactly "choppy, garbled audio on the relayed direction
+while the recording is perfect" — the recording taps *received* packets only, so it never saw any of this,
+which is why the earlier diagnosis correctly pointed at the relay rather than the trunk but still missed
+the actual mechanism.
 
-- Sending the instant a packet arrives, with no reordering — fixed (first attempt).
-- Sending bursts back-to-back with no pacing between them — fixed (`PacedRtpRelay`'s 20ms tick).
-- A Telnyx outbound-voice-profile setting — unlikely as the primary cause: the symptom is asymmetric
-  between legs and directions in a way a single account-level setting on one trunk connection wouldn't
-  produce, and the original diagnostic signal (recording clean, live choppy) already pointed at the relay,
-  not the trunk.
+Fixed with `PromptPlayer.SuspendBackgroundSilence()` / `ResumeBackgroundSilence()`
+(`CallTree.Telephony/Audio/PromptPlayer.cs`), which re-sources the leg's `AudioExtrasSource` to
+`AudioSourcesEnum.None` — actually disposing the silence timer, not just pausing it — for as long as a
+relay owns that leg's outgoing RTP directly. `AudioExtrasSource.PauseAudio` could not do this: it only
+sets a flag the silence timer itself never reads. Both `RunBridgeAsync` and the proxy-dial path now call
+`SuspendBackgroundSilence()` on every leg a `PacedRtpRelay` drives, before the relay starts. The inbound
+bridge's legs stay suspended for the rest of the call (both audio sources close right after); the proxy
+dial's primary (operator) leg calls `ResumeBackgroundSilence()` in its `finally` block instead, because
+the operator's own call carries on after the proxy segment ends and needs a live source again — both for
+RTP to keep flowing on that leg between dials and for the recording tone.
 
-Hypotheses worth investigating first, roughly in order of how cheap they are to test:
+`PacedRtpRelay` also grew an end-of-call log line — frames sent, elapsed time, effective rate, idle ticks,
+frames still queued at close — so a future regression here shows up as a rate materially under the
+expected ~50/s (one 20ms frame) rather than needing a live ear on a call to notice it.
 
-1. **`Telephony:JitterBufferMilliseconds` (default 60ms / 3 frames) may be too shallow for real network
-   jitter on this path**, especially mobile-network legs. `PacedRtpRelay`'s buffer only smooths what it has
-   time to reorder before the next tick demands a frame; if real jitter routinely exceeds the buffer depth,
-   the paced tick finds nothing ready more often than it should, which sounds identical to choppiness from
-   the listener's side even though the pacing fix is doing its job correctly. Cheap to test: temporarily
-   raise the setting (it is a live, per-call setting, no restart needed) and listen for whether it helps -
-   if it does, the real fix is either raising the default or making it adaptive, not architecture surgery.
-2. **No clock-drift correction over the length of a call.** `PacedRtpRelay`'s `PeriodicTimer` runs on
-   CallTree's own wall clock; the sender's RTP stream runs on *its* clock. No two independent clocks agree
-   exactly, and nothing here periodically resynchronises the two - a production jitter buffer (e.g. WebRTC's
-   NetEQ) adaptively drops or duplicates a frame occasionally to correct for this. Without it, a long
-   enough call could still drift, just far more slowly than before this fix. Test by comparing a short call
-   against a long one - if choppiness/lag is roughly constant regardless of call length now, this is
-   unlikely to be the (remaining) cause; if it still visibly worsens over minutes, this is the next thing
-   to build (needs an actual adaptive resync strategy, not a bigger fixed buffer).
-3. **The two relay directions may not be as symmetric in practice as the code is.** `RunBridgeAsync`
-   constructs `toOutboundRelay` (caller→mobile) and `toInboundRelay` (mobile→caller) identically - same
-   jitter depth, same pacing class - so a *code* asymmetry is not the obvious explanation for one leg
-   being reported worse. More likely candidates: the caller-side network path (arbitrary inbound callers,
-   often mobile, on networks CallTree has no visibility into) is simply jitterier than the trunk-to-DID
-   path Phase 3's already-validated Outbound-source recording relies on; or `Telephony:MyCellNumber`'s own
-   carrier/handset runs a smaller or more aggressive jitter buffer that is more sensitive to whatever
-   residual irregularity remains. Worth confirming with `Telephony:TraceSip` plus a packet capture on both
-   legs of the same call, comparing actual inter-arrival timing - if the *inbound* leg's arrivals are
-   already irregular at the source, no amount of relay-side pacing fully hides that, and the fix would need
-   to be a deeper/adaptive buffer specifically sized to what that leg actually needs, not a uniform 20ms
-   assumption applied to both directions alike.
-4. Worth double-checking `SendRtpRaw`'s marker-bit argument (currently always `0`) and whether the
-   receiving side's own jitter buffer treats a correctly-marked first-packet-after-silence any differently -
-   low-probability but cheap to check once the higher-probability items above are ruled out.
+**Status: fixed and re-validated.** The jitter-depth/clock-drift/asymmetric-path hypotheses above turned
+out not to be needed — worth remembering if relay audio quality is ever revisited, so they aren't
+re-investigated from scratch.
 
 ### Elsewhere
 
@@ -798,10 +785,10 @@ which per the existing note takes the provider's binding away from the deployed 
   hangup from either side ends the call cleanly, an unanswered ring lands in `Missed` with the apology
   prompt, and the resulting stereo recording plays back with both sides on their correct channel.
 - Phase 4 addendum (Outbound proxy dial, `*{NUMBER}#`): validated by phone and operator-confirmed done —
-  connect, notice, both sides audible and recorded, `PacedRtpRelay` measurably improved the choppy/growing-lag
-  bug found on the first test. **Known open issue** (deferred, not blocking "done"): some chop/lag still
-  audible on both bridging paths, worst on the Inbound bridge's caller→`MyCellNumber` direction — see the
-  dedicated Known Issue section above before touching the relay code again.
+  connect, notice, both sides audible and recorded. The choppy/growing-lag relay bug went through two
+  fixes: `PacedRtpRelay` (pacing) measurably improved it but didn't fully eliminate it, and the actual
+  remaining cause — a leg's background silence timer and `PacedRtpRelay` both writing to the same SSRC —
+  was found and fixed 2026-08-28. See the "Fixed" section above.
 - Configuration layering, hot reload, the password merge rules and the restart-required reporting:
   verified against a running instance, not just unit-tested.
 - Phase 9 (SMS): **receiving validated by real texts.** The webhook, the signature check and the message

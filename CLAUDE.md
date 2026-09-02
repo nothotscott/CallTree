@@ -45,23 +45,22 @@ consent note below — the structural gap it describes (the party added via the 
 hears anything) is unchanged by that decision, it is a property of the design. Note `recording-notice.wav`
 is a *different* prompt now — see the addendum below.
 
-**Phase 4 addendum — Outbound proxy dial: done, per the operator, with a known open audio-quality issue.**
-While on an Outbound-source call, dialing `*{NUMBER}#` places a second leg from `Telephony:DidNumber` to
-whatever number was entered — a self-hosted outbound calling proxy, so the far end sees the DID rather
-than the operator's real mobile. Reuses Phase 4's dial primitive (now extracted as `PlaceOutboundLegAsync`,
-shared by `BridgeToMobileAsync`) and mixes the proxy party's audio live into the *same* mono `CallRecorder`
-already running for the call, rather than starting a second `Recording` — see PROGRESS.md for why (the
-domain only supports one `Recording` per `Call`) and for the `CallRecorder`/`RtpLegAccumulator` design that
-makes that work. `recording-notice.wav` ("This call is being recorded") plays to the proxy-dialed party on
-connect - it is the one leg on this path CallTree can disclose to directly, unlike a native-merged party.
+**Phase 4 addendum — Outbound proxy dial: done.** While on an Outbound-source call, dialing `*{NUMBER}#`
+places a second leg from `Telephony:DidNumber` to whatever number was entered — a self-hosted outbound
+calling proxy, so the far end sees the DID rather than the operator's real mobile. Reuses Phase 4's dial
+primitive (now extracted as `PlaceOutboundLegAsync`, shared by `BridgeToMobileAsync`) and mixes the proxy
+party's audio live into the *same* mono `CallRecorder` already running for the call, rather than starting a
+second `Recording` — see PROGRESS.md for why (the domain only supports one `Recording` per `Call`) and for
+the `CallRecorder`/`RtpLegAccumulator` design that makes that work. `recording-notice.wav` ("This call is
+being recorded") plays to the proxy-dialed party on connect - it is the one leg on this path CallTree can
+disclose to directly, unlike a native-merged party.
 
-Real testing confirmed connect/notice/recording all work and, after the `PacedRtpRelay` fix (see Gotchas
-below), the operator directed marking both this addendum and Phase 4 **done**. **But do not treat the audio
-path as fully solved** — re-testing after that fix still found some chop/lag on both bridging paths, worst
-on the Inbound bridge's caller→`MyCellNumber` direction. Diagnosis was explicitly deferred, not chased
-further. **PROGRESS.md has a dedicated "⚠️ KNOWN ISSUE" section with what's already ruled out and specific
-hypotheses to start from (jitter-buffer depth, clock drift over a long call, one leg's network path being
-inherently jitterier than the other) — read it before touching the relay code again.**
+Real testing confirmed connect/notice/recording all work, and the relay-audio-quality issue found along the
+way (chop/lag on both bridging paths, worst on the Inbound bridge's caller→`MyCellNumber` direction) is
+**fixed as of 2026-08-28** — two separate bugs, not one: `PacedRtpRelay` (pacing) fixed the first symptom,
+and a second, unrelated bug (a relayed leg's own background-silence timer fighting the relay on the same
+SSRC) turned out to be the cause of what survived that fix. See the Gotchas section below and PROGRESS.md's
+Phase 4 addendum "Fixed" write-up for the full mechanism.
 
 **This also raises the stakes on `Telephony:OutboundPin`**: unlike the Inbound
 bridge, which only ever dials the fixed `MyCellNumber`, the proxy dial places a call to whatever number
@@ -254,12 +253,22 @@ stage and copies them into the API's `wwwroot`. One container, one port, one ori
   release **at most one frame per fixed 20ms tick** via a `PeriodicTimer`, decoupled from arrival timing
   entirely. Both `RunBridgeAsync` and `RunProxyDialAsync` use it — reuse it for any future relay rather
   than wiring `SendRtpRaw` up to `OnRtpPacketReceived` directly, and don't stop at "reordered" when
-  diagnosing relay choppiness — pacing is the part that actually matters. **Still not the end of it,
-  though**: re-testing after this fix still found some chop/lag on both bridging paths (worst on the
-  Inbound bridge's caller→`MyCellNumber` direction) — deferred, open, see PROGRESS.md's "⚠️ KNOWN ISSUE"
-  section for what's already ruled out and where to start (buffer depth, long-call clock drift with no
-  resync, one leg's network path plausibly being inherently jitterier than the other). Don't assume
-  `PacedRtpRelay` is the final word on this.
+  diagnosing relay choppiness — pacing is the part that actually matters. **Still wasn't the end of it**:
+  re-testing after this fix still found some chop/lag, which turned out to be a second, unrelated bug —
+  see the next entry.
+- **A relayed leg's own background silence timer must be suspended, or it fights the relay on the same
+  SSRC.** `VoIPMediaSession.Start` starts each leg's `AudioExtrasSource` silence timer unconditionally, and
+  it doesn't know a `PacedRtpRelay` is now also calling `SendRtpRaw` on the same leg — both share one SSRC
+  and sequence-number counter, so the far end gets ~100 packets/s alternating between two unrelated RTP
+  timestamp bases (silence timer vs. relayed clock), half of them silence. That reads as choppy/garbled
+  audio on the relayed direction while the recording (which only taps *received* packets) sounds perfect —
+  which is exactly the symptom that survived the `PacedRtpRelay` fix above and was initially chased as a
+  jitter-buffer/clock-drift problem before the actual cause turned up. Fixed by
+  `PromptPlayer.SuspendBackgroundSilence()` (re-sources to `AudioSourcesEnum.None`, which actually disposes
+  the timer — `AudioExtrasSource.PauseAudio` doesn't, it only sets a flag the timer never reads), called on
+  every leg a `PacedRtpRelay` drives before the relay starts. See PROGRESS.md's Phase 4 addendum "Fixed"
+  section for the full write-up, including why a leg that outlives the relay (the proxy dial's operator
+  leg) has to call `ResumeBackgroundSilence()` afterwards rather than staying suspended.
 - **NAT: `Telephony:PublicHost` is mandatory when running behind a router.** SIPSorcery substitutes the
   *local* address into the REGISTER `Contact` (see `SIPTransport.ContactHost`), so without it the trunk is
   told to reach us at a LAN address and inbound INVITEs never arrive — the caller hears a busy/failure tone

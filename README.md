@@ -1,23 +1,38 @@
+<p align="center"><img src="CallTree.png" alt="CallTree" width="140"></p>
+
 # CallTree
 
-A self-hosted call recorder and bridge PBX built on a from-scratch SIP user agent. It owns a single phone
-number on a SIP trunk, screens inbound callers, bridges them to your mobile, and records the conversation.
+A self-hosted VoIP server for your homelab: one SIP phone number, screened, recorded, and logged, all
+running on hardware you control. CallTree turns away callers who won't press a button to get through,
+records the calls worth keeping — including your own, via your phone's normal three-way merge — bridges
+screened-in callers to your mobile, and forwards the texts sent to your number. Every call and message lands
+in a call log and recordings browser you run yourself, not a third party's database.
 
-It is deliberately **not** a wrapper around Asterisk, FreeSWITCH or PJSIP. Signalling, media, DTMF and
+Under the hood, it's a self-hosted call recorder and bridge PBX built on a **from-scratch SIP user agent**.
+It is deliberately **not** a wrapper around Asterisk, FreeSWITCH or PJSIP: signalling, media, DTMF and
 recording are implemented directly against [SIPSorcery](https://github.com/sipsorcery-org/sipsorcery), which
 makes it a practical way to actually learn SIP and RTP rather than configure someone else's dial plan. If
 you want a fully featured PBX, use a fully featured PBX.
 
-> **Status: in development.** Phases 0–5 are complete and validated over a real trunk — registration,
-> inbound signalling, prompt playback, the DTMF screening gate, recording calls from your own number, and
-> bridging an inbound caller to your mobile with both sides recorded all work, including a ringback tone
-> while your phone rings and a clean hangup from either side. An outbound proxy dial (`*{NUMBER}#` while on
-> a call from your own number, placing a second leg from your DID) is written and unit-tested but not yet
-> validated over the trunk. **SMS is newly built and not yet validated against a real number** — inbound
-> forwarding and `{number} body` sending are implemented, unit-tested and exercised end to end against a
-> running instance, but nobody has texted the DID yet. The SvelteKit web UI has a call log, a recordings
-> browser with playback, a message log, a status page and a settings page. See
-> [PROGRESS.md](PROGRESS.md) and [TODO.md](TODO.md).
+> **Status: validated in daily use.** Every piece of telephony — trunk registration, the inbound screening
+> gate, recording calls from your own number, bridging an inbound caller to your mobile in stereo, and an
+> outbound calling proxy (`*{NUMBER}#`, placing a second leg from your DID) — has been exercised over a real
+> trunk on real phone calls, audio quality included. SMS receiving is validated by real texts too; sending
+> is written and tested, and needs nothing further once 10DLC registration clears (see
+> [Messaging](#messaging-sms)) — until then the line runs receive-only, which is a supported mode, not a
+> degraded one. The SvelteKit web UI covers all of it: a call log, a recordings browser with playback, a
+> message log, a live telephony status page and a settings page — see [Screenshots](#screenshots) below.
+> Full history in [PROGRESS.md](PROGRESS.md); what's left in [TODO.md](TODO.md).
+
+## Screenshots
+
+Seeded with placeholder demo data — a real deployment's call log fills in the same way from real calls.
+
+| | |
+|---|---|
+| ![Call log](screenshots/calls.png) Call log — every call, filterable by source and status | ![Recordings](screenshots/recordings.png) Recordings browser, searchable by name |
+| ![Recording detail](screenshots/recording-detail.png) Recording detail — stereo, one channel per leg, renamed in place | ![Messages](screenshots/messages.png) Message log, with the receive-only banner when there's no key to send with |
+| ![Telephony status](screenshots/status.png) Live telephony status — registration state and what would otherwise fail silently | ![Settings](screenshots/settings.png) Settings, edited from the browser instead of shell access |
 
 ## How it works
 
@@ -33,7 +48,9 @@ One number; every call to or from it passes through CallTree, which classifies e
   stereo, one leg per channel.
 
 Both start life as inbound SIP INVITEs — `Outbound`/`Inbound` describe the *business* meaning, while
-`LegDirection` describes the SIP-level direction of an individual leg.
+`LegDirection` describes the SIP-level direction of an individual leg. The names come from where the
+project started: recording the operator's own outgoing calls came first, everyone-else screening and
+bridging came after, and the two `CallSource` names still reflect that history rather than a coin flip.
 
 **Text messages work the same way**, classified by the sender's number rather than the caller ID:
 
@@ -46,6 +63,26 @@ Both start life as inbound SIP INVITEs — `Outbound`/`Inbound` describe the *bu
 
 Messages arrive over the provider's HTTPS webhook rather than over SIP, so this needs one more thing
 exposed than calls do — see [Messaging](#messaging-sms).
+
+### The pieces
+
+Zooming out from any one call or text, the project is a small number of parts that each do one job:
+
+- **The telephony backend** (`CallTree.Telephony`) is the from-scratch SIP/RTP stack described above — it
+  owns the trunk registration, the screening gate, the bridge, and DTMF handling. See
+  [Audio codecs](#audio-codecs) and [How recording works](#how-recording-works).
+- **Messaging** (`CallTree.Messaging`) is a sibling, not a child — it never touches SIP, talking to the
+  provider over HTTPS instead. See [Messaging (SMS)](#messaging-sms).
+- **The database** is a single SQLite file recording every call, leg, recording and message — no separate
+  server to run or back up.
+- **Recordings** are plain WAV files on disk, one per call, named and grouped by month; the database just
+  tracks where they are.
+- **The web UI** ([`CallTree.UI/`](CallTree.UI/), SvelteKit) is the browser for all of the above: the call
+  log, the recordings browser with playback, the message log, a live telephony status page, and settings
+  editable without shell access. See [Screenshots](#screenshots) above and [Web UI and API](#web-ui-and-api)
+  below.
+- **Deployment** ships all of it — API and UI — as one Docker image, one port, no CORS to configure. See
+  [Deployment](#deployment).
 
 ## Requirements
 
