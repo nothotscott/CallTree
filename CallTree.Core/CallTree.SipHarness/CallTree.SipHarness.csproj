@@ -1,0 +1,27 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>CallTree.SipHarness</RootNamespace>
+    <!-- A developer tool, never published: the Dockerfile builds CallTree.Api.csproj by name. -->
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!--
+      Referenced for G711 alone. The harness is the only thing in the repo that *encodes* PCMU - a real
+      call only ever forwards payloads it was handed - and a second mu-law implementation living in a
+      test tool is exactly how two subtly different codecs end up in one repo.
+    -->
+    <ProjectReference Include="..\CallTree.Telephony\CallTree.Telephony.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Extensions.Logging.Console" Version="10.0.10" />
+    <PackageReference Include="SIPSorcery" Version="10.0.12" />
+  </ItemGroup>
+
+</Project>

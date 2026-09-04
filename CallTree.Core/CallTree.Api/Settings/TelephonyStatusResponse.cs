@@ -46,6 +46,13 @@ public sealed record TelephonyStatusResponse
 
     public required string? RtpPortRange { get; init; }
 
+    /// <summary>
+    /// True when this process is running against the local SIP harness rather than a trunk. Worth
+    /// surfacing prominently: every other field on this response describes a line that cannot receive a
+    /// real call.
+    /// </summary>
+    public required bool Spoofing { get; init; }
+
     /// <summary>False when the DID filter is off and every dial-plan probe reaching the port is answered.</summary>
     public required bool DidFilterActive { get; init; }
 

@@ -17,13 +17,32 @@ that history. What's left is grouped by topic instead.
 
 ## Trunk and calls
 
-- [ ] Refactor per-call handling out of `TelephonyBackgroundService` into a `CallSession` runtime class
-      plus an `ActiveCallRegistry`. Deliberately deferred so far — see PROGRESS.md's scope note. Worth
-      doing once something actually needs to reason about more than one active call at a time.
-- [ ] Replace the single long-lived listener `SIPUserAgent` with a per-call agent. One agent holds one
-      dialogue, so a second concurrent *inbound* call — or a dialogue left behind by an abnormal teardown —
-      is silently dropped with no log line. Pre-existing since Phase 1; the bridge's outbound leg already
-      uses its own separate per-call agent, so it neither worsens nor fixes this.
+- [ ] **Simultaneous calls.** Now reproducible on demand rather than theoretical: `CallTree.SipHarness`
+      with `--calls 3` reports `peak simultaneous callers: 1 of 3` — one call answered, one answered only
+      after the first hung up (off SIP retransmission, 15.9s later), one never answered at all with its
+      Call-ID appearing nowhere in the log. Staged plan and prompts in
+      `ClaudeLog/CallTree/Output/multi-call-refactor.md`. In order:
+  - [ ] Replace the single long-lived listener `SIPUserAgent` with a per-call agent. One agent holds one
+        dialogue in one field, and once it has answered anything it stops raising `OnIncomingCall`
+        entirely — so the second INVITE is not rejected, it is never seen. `SIPUserAgent.Answer` also
+        documents "any existing call will be hungup". `CallTree.SipHarness/FarEndAnswerer.cs` already
+        implements the per-INVITE-agent pattern to copy.
+  - [ ] Call `Close()`, not just `Hangup()`, on every per-call agent. A `SIPUserAgent` subscribes to
+        `SIPTransportRequestReceived` in its constructor and only unsubscribes in `Close()`/`Dispose()`;
+        today nothing but the listener is ever closed. Harmless at one call an hour, a per-call leak once
+        agents are per call.
+  - [ ] Refactor per-call handling out of `TelephonyBackgroundService` into a `CallSession` runtime class
+        plus an `ActiveCallRegistry`. Deliberately deferred so far — see PROGRESS.md's scope note.
+  - [ ] `Telephony:MaxConcurrentCalls` answering `486 Busy Here` beyond the limit, before a `Call` row
+        exists, the way the DID filter answers 404. Validate the RTP range covers it at startup.
+  - [ ] Configure SQLite for concurrent writers (WAL + busy timeout) in `AddInfrastructure`. Today's
+        connection string sets neither, which is safe only because calls cannot currently overlap.
+- [ ] DTMF sent in the first moments after answer can be lost: `HandleIncomingCallAsync` persists
+      `AnswerCall` — a database round trip — before `ScreenAsync` attaches the gate. No human can hit that
+      window; the harness could, and needs a `--dtmf-delay` to avoid it. Concurrency widens the window.
+- [ ] `*{NUMBER}#` keyed in during `recording-reminder.wav` (~6s) is silently discarded: the prompt plays
+      before `RecordOutboundSourceAsync` constructs the `ProxyDialCollector`, and losing just the leading
+      `*` discards the whole sequence. Found by the harness; needs `--proxy-delay 10` to test around.
 - [ ] Re-check the trunk account's concurrency and per-call duration caps. A 10-minute ceiling would
       truncate recordings; some providers apply one on lower tiers.
 - [ ] No audible feedback on an unanswered outbound proxy dial (`*{NUMBER}#`) beyond a log line. A
@@ -65,7 +84,8 @@ that history. What's left is grouped by topic instead.
 - [ ] Restart the service from the UI, so a trunk change doesn't need shell access. Needs care: the
       process only supervises itself under Compose's `restart: unless-stopped`, and there is no auth yet.
 - [ ] Live call state on the status page — needs the `CallSession`/`ActiveCallRegistry` work above first,
-      since there's no runtime call registry yet to answer "is a call up right now".
+      since there's no runtime call registry yet to answer "is a call up right now". The page already
+      shows `spoofing` from `/api/telephony/status`.
 - [ ] Call detail view, once the call detail endpoint above exists.
 
 ## Retention

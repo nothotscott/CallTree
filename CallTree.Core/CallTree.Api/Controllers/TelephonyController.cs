@@ -47,6 +47,7 @@ public class TelephonyController(
             ContactHost = snapshot.ContactHost,
             SdpAddress = snapshot.SdpAddress,
             RtpPortRange = snapshot.RtpPortRange,
+            Spoofing = snapshot.Spoofing,
             // Read from configuration rather than the snapshot: both follow configuration live, so the
             // snapshot would go stale the moment either is changed from the settings page.
             DidFilterActive = line.Did is not null,

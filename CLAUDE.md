@@ -113,6 +113,8 @@ CallTree/
 │   │                            #   policy; Telnyx/ holds the REST client and the webhook signature check
 │   ├── CallTree.Api/            # ASP.NET Core host; DI wiring; /health; Scalar at /scalar (dev)
 │   │                            #   Settings/ owns the writable config file the UI edits
+│   ├── CallTree.SipHarness/     # dev tool, never published: a real SIP client that drives a spoofing-
+│   │                            #   mode instance with real RTP. Has its own README — read it first
 │   └── CallTree.Tests/          # xUnit v3 — pure-logic tests only (state machine, PhoneNumber, WAV logic)
 └── CallTree.UI/             # SvelteKit frontend (has its own CLAUDE.md/AGENTS.md — read them)
 ```
@@ -324,6 +326,14 @@ stage and copies them into the API's `wwwroot`. One container, one port, one ori
   recording is the case that genuinely needs a shared wall clock — two legs, two unrelated RTP clocks.
 - **Filter the RTP payload type before decoding.** Payload 101 (RFC 4733 telephone-event) shares the
   session with PCMU; decoding it as audio writes a burst of noise into the recording on every keypress.
+- **`G711.Encode` diverges from NAudio at `short.MinValue`, and takes the magnitude before the shift.**
+  Two deliberate departures, both pinned by `G711Tests`. NAudio's encoder negates in a `short` before
+  clipping, so `short.MinValue` wraps to itself and comes out as 0x7F — silence, for the loudest possible
+  sample. `G711` clips in an `int` and answers 0x00, the most negative code. Separately, the ITU
+  reference shifts to 14 bits *before* taking the magnitude, and an arithmetic shift of a negative floors
+  rather than truncating toward zero, so -31611 lands a quantisation step away from where +31611 does;
+  `G711` takes `Math.Abs` first, which is symmetric and agrees with NAudio everywhere else. The encode
+  exists only for `CallTree.SipHarness` — a real call forwards payloads and never encodes.
 - **G.711 code 0x7F decodes to 0 here, not −1.** NAudio's `MuLawDecoder` table says −1 for that
   "negative zero" code; the ITU reference expansion computes 0, and so does `G711`. Inaudible either way,
   but `G711Tests` asserts the whole 256-code table against NAudio *except* this one so the disagreement
@@ -381,6 +391,30 @@ stage and copies them into the API's `wwwroot`. One container, one port, one ori
 - **The `aspnet:10.0` base image is Debian slim and has no HTTP client** — no curl, no wget. The Dockerfile
   installs curl solely so the compose healthcheck has something to run; a healthcheck whose binary is
   missing doesn't error, it just leaves the container permanently `unhealthy`.
+- **Spoofing mode refuses to start beside a configured trunk, and that guard is not optional.**
+  `Spoof:Enabled` with `Trunk:Host` set logs `LogCritical` and returns without opening a socket. A
+  spoofing instance dials outbound legs at a loopback address and answers INVITEs nothing upstream
+  vouched for; half-simulated against a real line is a real line with its guard rails quietly moved, and
+  the failure arrives as a phone bill rather than an error. For the same reason spoofing rejects INVITEs
+  from off-box with a 403 unless `Spoof:AllowRemoteCallers` is set — with no trunk registration, the DID
+  filter and the screening gate are the only things between the SIP port and an outbound leg.
+  `Spoof` is a top-level section, not a property of `TelephonyOptions`, and is bound as `IOptions` rather
+  than `IOptionsMonitor` on purpose: whether a process is talking to a real trunk is not a thing that may
+  change under a running call, and it deliberately stays out of `TelephonySettingsWatcher` and the
+  settings document the UI writes. `/api/telephony/status` reports `spoofing` — check it before believing
+  anything else on that page, since every other field describes a line that cannot take a real call.
+- **A `SIPUserAgent` subscribes to `SIPTransportRequestReceived` in its constructor and unsubscribes only
+  in `Close()`/`Dispose()`.** `Hangup()` ends the call and leaves the handler attached. Today only the
+  listener agent is ever closed, which is harmless because the outbound legs are rare — but it becomes a
+  per-call leak the moment incoming agents are per call, and every leaked handler inspects every packet
+  on the transport for the life of the process. Close every agent you create.
+- **One `SIPUserAgent` holds exactly one dialogue, and a busy one stops reporting incoming calls at all.**
+  `m_uac`/`m_uas`/`m_sipDialogue` are single fields; `Answer` documents "any existing call will be
+  hungup"; and in `SIPUserAgent.SIPTransportRequestReceived` the incoming-call branch is an `else` on
+  `m_sipDialogue != null`, so once the agent has answered anything a new INVITE matches nothing and is
+  dropped without a response or a log line. That is why a second concurrent call today is silent rather
+  than rejected, and why the caller's stack retransmits for ~32s and sometimes gets answered late. See
+  TODO.md and `ClaudeLog/CallTree/Output/multi-call-refactor.md`.
 - **Only one instance may hold the trunk registration.** The provider keeps the most recent binding, so a
   second instance on the same credential silently steals inbound calls. Stop the old one before deploying.
   **This bites during local testing too**: user secrets supply the real trunk credentials in Development,
@@ -459,5 +493,21 @@ stage and copies them into the API's `wwwroot`. One container, one port, one ori
 ## Testing philosophy
 
 Unit-test what's pure logic (domain transitions, normalization, WAV/timing math). Telephony behavior is
-validated per-phase by real phone calls; a scratch SIPSorcery console caller works for local E2E and can
-send real RFC 4733 DTMF.
+validated per-phase by real phone calls — that rule stands, and nothing below replaces it.
+
+Between those two sits **spoofing mode plus `CallTree.SipHarness`**: `Spoof:Enabled` starts the whole
+SIP/RTP stack with no trunk and no registration, dialing outbound legs at `Spoof:LoopbackHost` instead of
+a provider, and the harness is a real SIP client that answers there. Everything in between is genuine —
+SDP negotiation, RFC 4733 DTMF the real gate has to debounce, mu-law frames the real recorder has to
+reorder and write. Only the caller ID is fiction, which is the point: caller ID is what CallTree
+classifies on.
+
+Every harness leg plays a distinct sine tone and the received audio is scored against the tone series
+with a Goertzel detector, so checks are identity checks ("caller 3's far end heard caller 3") rather than
+liveness checks ("audio flowed"). Crossed bridges and swapped recording channels still move packets and
+still produce a playable file; they fail here. It also reports peak simultaneous callers, because calls
+that each behaved perfectly but never overlapped are sequential calls.
+
+What it cannot show you: NAT (everything is loopback, so `NatAwareVoIPMediaSession` is untested),
+provider quirks, and audio quality — chop and lag a human hears easily leave the dominant frequency
+alone. See `CallTree.Core/CallTree.SipHarness/README.md`.

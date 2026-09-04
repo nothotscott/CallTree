@@ -14,6 +14,7 @@ public static class DependencyInjection
     {
         services.Configure<TrunkOptions>(configuration.GetSection(TrunkOptions.SectionName));
         services.Configure<TelephonyOptions>(configuration.GetSection(TelephonyOptions.SectionName));
+        services.Configure<SpoofOptions>(configuration.GetSection(SpoofOptions.SectionName));
 
         // Registered after the rules built from the Logging section, which is what lets Telephony:TraceSip
         // win over an explicit level for the SIP trace category. Configuration is captured rather than

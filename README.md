@@ -165,6 +165,9 @@ Everything under `Messaging:` is read per request, so all of it applies without 
 | `Telephony:ScreeningTimeoutSeconds` | `12` | How long they have to press it. Also the PIN deadline |
 | `Telephony:DialTimeoutSeconds` | `25` | How long to let your mobile ring before giving up and telling the caller nobody answered |
 | `Telephony:OutboundPin` | — | PIN required before a call from your own number is answered and recorded. Blank means caller ID alone decides, and caller ID is spoofable |
+| `Spoof:Enabled` | `false` | Local testing only: run the SIP stack with no trunk and no registration, dialling outbound legs at the loopback host. Refuses to start if `Trunk:Host` is also set |
+| `Spoof:LoopbackHost` | `127.0.0.1:5070` | Where outbound legs go in spoofing mode — the SIP harness's port |
+| `Spoof:AllowRemoteCallers` | `false` | Accept spoofed INVITEs from off-box. Off by default: with no trunk registration, the DID filter is the only thing guarding the port |
 | `Telephony:JitterBufferMilliseconds` | `60` | How long received audio is held so out-of-order RTP can be reordered before it is written |
 | `Telephony:RecordingToneIntervalSeconds` | `0` | Seconds between recording-notice tones; `0` for none. The only notice a merged-in third party hears — see [Recording consent](#recording-consent--read-this) |
 | `Telephony:PromptsRoot` | `prompts` | Prompt directory, relative to the content root |
@@ -477,6 +480,7 @@ CallTree/
 │   ├── CallTree.Telephony/        # SIPSorcery + NAudio; owns the SIP user agent
 │   ├── CallTree.Messaging/        # SMS: provider REST client, webhook verification, relay policy
 │   ├── CallTree.Api/              # ASP.NET Core host, DI wiring, /health
+│   ├── CallTree.SipHarness/       # Dev tool: a real SIP client for spoofing-mode testing
 │   └── CallTree.Tests/            # xUnit; pure logic only
 ├── CallTree.UI/                 # SvelteKit frontend (call log)
 ├── deploy/                      # Dockerfile, Compose, firewall lists
@@ -496,11 +500,39 @@ dotnet test CallTree.Core/CallTree.Tests
 ```
 
 Unit tests cover what is genuinely pure logic: the call state machine, phone-number normalisation, the WAV
-parsing and timing maths, the G.711 decode (checked against NAudio's decoder for all 256 codes), the RTP
-reordering buffer, the recorder's silence-fill and discontinuity handling, the message state machine, the
-`{number} body` command parser, and the webhook signature check (against real Ed25519 signatures). Telephony
-behaviour itself is validated by placing real calls — a short SIPSorcery console program makes a serviceable
-scripted caller for local end-to-end tests.
+parsing and timing maths, the G.711 codec in both directions (checked against NAudio over all 256 decode
+codes and all 65,536 encode inputs), the RTP reordering buffer, the recorder's silence-fill and
+discontinuity handling, the message state machine, the `{number} body` command parser, and the webhook
+signature check (against real Ed25519 signatures).
+
+### Calls without a phone: spoofing mode and the SIP harness
+
+Telephony behaviour is still validated by placing real calls, and always will be. But most of it can be
+exercised first, on one machine, with no trunk and no provider.
+
+Set `Spoof:Enabled` (and leave `Trunk:Host` blank — it refuses to start otherwise) and CallTree brings up
+the whole SIP/RTP stack with no registration, dialling outbound legs at `Spoof:LoopbackHost` instead of a
+trunk. Then `CallTree.SipHarness` calls it as a real SIP client:
+
+```bash
+dotnet run --project CallTree.Core/CallTree.SipHarness -- \
+  --did +15551234567 --cell +15559876543 \
+  --scenario inbound --calls 3 --duration 12 \
+  --recordings /path/to/data/recordings
+```
+
+Nothing about it is a mock: real SDP negotiation, real RFC 4733 DTMF the screening gate has to debounce,
+real mu-law frames on a 20 ms cadence that the recorder has to reorder and write. Only the caller ID is
+fiction — which is the point, since caller ID is what CallTree classifies on.
+
+Each leg plays its own sine tone, so the harness can check *whose* audio arrived rather than merely that
+some did — the far end of caller 3 must hear caller 3's tone, and channel 0 of caller 3's recording must
+contain it. Crossed bridges and swapped recording channels still produce playable files; they fail here.
+It also reports peak simultaneous callers, which is how the concurrency limitation in TODO.md stopped
+being theoretical.
+
+What it cannot show you: NAT (everything is on loopback), provider quirks, and whether the call sounds
+good to a human. Full details in [`CallTree.Core/CallTree.SipHarness/README.md`](CallTree.Core/CallTree.SipHarness/README.md).
 
 The messaging webhook can be exercised without a phone: run the API with `Trunk:Host` blank so the SIP
 stack stays idle, set `Messaging:PublicKey` to a key you hold, and POST a signed body to

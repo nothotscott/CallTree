@@ -32,6 +32,9 @@ public class TelephonyBackgroundService(
     IOptionsMonitor<TrunkOptions> trunkOptions,
     IOptionsMonitor<TelephonyOptions> telephonyOptions,
     IOptionsMonitor<LineOptions> lineOptions,
+    // IOptions, not IOptionsMonitor: whether this process is talking to a real trunk is not something
+    // that may change under a running call. It is read once, at startup, and a change needs a restart.
+    IOptions<SpoofOptions> spoofOptions,
     TelephonySettingsWatcher settingsWatcher,
     TelephonyStatus status,
     PromptLibrary prompts,
@@ -45,6 +48,12 @@ public class TelephonyBackgroundService(
     private IPAddress? _publicAddress;
     private PortRange? _rtpPortRange;
     private string _lastReportedPendingKeys = "";
+
+    /// <summary>
+    /// Captured in <see cref="ExecuteAsync"/> before anything else reads it, so every later decision -
+    /// where outbound legs are dialled, which callers are accepted - sees one consistent answer.
+    /// </summary>
+    private SpoofOptions _spoof = new();
 
     /// <summary>
     /// The configured mobile, re-read per call: it costs a parse and means the settings UI can correct a
@@ -65,7 +74,22 @@ public class TelephonyBackgroundService(
         settingsWatcher.CaptureStartupSnapshot(telephony, trunk);
         WatchForRestartRequiringChanges();
 
-        if (!trunk.IsConfigured)
+        _spoof = spoofOptions.Value;
+
+        // Half-simulated is the one configuration that must never run. A spoofing instance dials outbound
+        // legs at a loopback address and answers INVITEs nobody upstream has vouched for; if it also held
+        // a trunk registration it would be a real line with its guard rails quietly moved, and the failure
+        // would arrive as a phone bill rather than as an error. Refuse, loudly.
+        if (_spoof.Enabled && trunk.IsConfigured)
+        {
+            _logger.LogCritical(
+                "Spoof:Enabled is set but so is Trunk:Host ('{Host}') - refusing to start telephony. Spoofing mode "
+                + "exists to run without a trunk; clear Trunk:Host (Trunk__Host= in the environment) to use it.",
+                trunk.Host);
+            return;
+        }
+
+        if (!trunk.IsConfigured && !_spoof.Enabled)
         {
             _logger.LogWarning("Trunk is not configured (Trunk:Host / Trunk:Username missing) - telephony is idle.");
             return;
@@ -108,6 +132,16 @@ public class TelephonyBackgroundService(
             .Select(c => c.ListeningSIPEndPoint.ToString())
             .ToList();
 
+        if (_spoof.Enabled)
+        {
+            _logger.LogWarning(
+                "SPOOFING MODE: no trunk, no registration. Outbound legs are dialled at {Loopback} instead of a "
+                + "provider, and INVITEs are accepted from {Sources}. Everything else - the DID filter, screening, "
+                + "recording, relaying - runs exactly as it does on a real line.",
+                _spoof.LoopbackHost,
+                _spoof.AllowRemoteCallers ? "anywhere" : "loopback only");
+        }
+
         _logger.LogInformation(
             "SIP listening on {Channels}; advertising {ContactHost} in Contact/SDP; RTP {RtpStart}-{RtpEnd}; SIP trace {TraceState}",
             string.Join(", ", listeningEndpoints),
@@ -118,7 +152,10 @@ public class TelephonyBackgroundService(
 
         status.Update(current => current with
         {
-            RegistrationState = TrunkRegistrationState.Registering,
+            // Spoofing never registers, so it stays NotConfigured rather than sitting on "Registering"
+            // forever. The Spoofing flag beside it is what says why.
+            RegistrationState = _spoof.Enabled ? TrunkRegistrationState.NotConfigured : TrunkRegistrationState.Registering,
+            Spoofing = _spoof.Enabled,
             StartedAt = DateTimeOffset.UtcNow,
             ListeningEndpoints = listeningEndpoints,
             ContactHost = _sipTransport.ContactHost is { Length: > 0 } contact ? contact : null,
@@ -132,7 +169,10 @@ public class TelephonyBackgroundService(
         listenerUserAgent.OnIncomingCall += (ua, request) =>
             _ = HandleIncomingCallAsync(ua, request, stoppingToken);
 
-        StartRegistration(trunk);
+        if (!_spoof.Enabled)
+        {
+            StartRegistration(trunk);
+        }
 
         try
         {
@@ -282,6 +322,13 @@ public class TelephonyBackgroundService(
     private static string TrunkServer(TrunkOptions trunk) =>
         trunk.Port == 5060 ? trunk.Host : $"{trunk.Host}:{trunk.Port}";
 
+    /// <summary>
+    /// Where an outbound leg is dialled: the trunk normally, the harness in spoofing mode. This one
+    /// substitution is what lets the bridge and the proxy dial run unmodified with nobody real to call.
+    /// </summary>
+    private string OutboundServer(TrunkOptions trunk) =>
+        _spoof.Enabled ? _spoof.LoopbackHost : TrunkServer(trunk);
+
     private void StartRegistration(TrunkOptions trunk)
     {
         var server = TrunkServer(trunk);
@@ -384,6 +431,22 @@ public class TelephonyBackgroundService(
 
             var rejection = new UASInviteTransaction(_sipTransport, request, null);
             rejection.SendFinalResponse(SIPResponse.GetResponse(request, SIPResponseStatusCodesEnum.NotFound, null));
+            return;
+        }
+
+        // Spoofing has no trunk registration, so nothing upstream vouched for this INVITE - the DID filter
+        // above and the screening gate below are all that stand between the SIP port and an outbound leg.
+        // Requiring the caller to be on this machine is what stops a spoofing instance being a strictly
+        // weaker version of the real one.
+        if (_spoof.Enabled && !_spoof.AllowRemoteCallers && !IsLoopback(request.RemoteSIPEndPoint?.Address))
+        {
+            _logger.LogWarning(
+                "Spoofing mode: rejecting INVITE from {RemoteEndPoint} - not a loopback address. Set "
+                + "Spoof:AllowRemoteCallers to drive this instance from another machine.",
+                remoteEndPoint);
+
+            var offBox = new UASInviteTransaction(_sipTransport, request, null);
+            offBox.SendFinalResponse(SIPResponse.GetResponse(request, SIPResponseStatusCodesEnum.Forbidden, null));
             return;
         }
 
@@ -822,7 +885,7 @@ public class TelephonyBackgroundService(
         var agent = new SIPUserAgent(_sipTransport, null);
         var (media, audio) = CreateMediaSession();
 
-        var server = TrunkServer(trunk);
+        var server = OutboundServer(trunk);
         var dst = $"sip:{target.Value.TrimStart('+')}@{server}";
         var from = $"<sip:{callerId.Value.TrimStart('+')}@{server}>";
         _logger.LogInformation("Call {CallId}: dialing {Destination} from {From}", callId, dst, from);
@@ -1259,6 +1322,16 @@ public class TelephonyBackgroundService(
     /// place an international call for them, so the URI user is the thing that distinguishes a real call
     /// from a probe — comparison is on the normalised number, since trunks vary on the +1 prefix.
     /// </summary>
+    /// <summary>
+    /// Whether an address is this machine. A UDP socket bound to <see cref="IPAddress.Any"/> on a
+    /// dual-stack host reports an IPv4 sender as the mapped form (::ffff:127.0.0.1), which
+    /// <see cref="IPAddress.IsLoopback"/> does not recognise on its own - so a harness on 127.0.0.1
+    /// would be rejected as off-box depending on how the channel happened to bind.
+    /// </summary>
+    private static bool IsLoopback(IPAddress? address) => address is not null
+        && (IPAddress.IsLoopback(address)
+            || (address.IsIPv4MappedToIPv6 && IPAddress.IsLoopback(address.MapToIPv4())));
+
     private static bool IsAddressedToUs(SIPRequest request, PhoneNumber? didNumber)
     {
         if (didNumber is null)

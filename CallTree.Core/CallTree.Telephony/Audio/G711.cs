@@ -1,8 +1,9 @@
 namespace CallTree.Telephony.Audio;
 
 /// <summary>
-/// G.711 mu-law (PCMU) expansion to 16-bit linear PCM — the only decode this project needs, because
-/// only PCMU is ever offered.
+/// G.711 mu-law (PCMU) companding, both directions. Expansion to 16-bit linear PCM is what a call
+/// needs, because only PCMU is ever offered; compression exists for the SIP harness, which synthesises
+/// its own audio rather than forwarding somebody else's.
 /// </summary>
 /// <remarks>
 /// Written out rather than taken from NAudio's <c>MuLawDecoder</c> because understanding the wire format
@@ -36,6 +37,14 @@ public static class G711
     private const int SegmentShift = 4;
     private const int MantissaMask = 0x0F;
 
+    /// <summary>Largest magnitude the format can carry, in the 14-bit domain it works in.</summary>
+    private const int Clip = 8159;
+
+    private const int SegmentCount = 8;
+
+    /// <summary>Top of the lowest exponent segment; every one above it is <c>(end &lt;&lt; 1) + 1</c>.</summary>
+    private const int FirstSegmentEnd = 0x3F;
+
     // 256 entries: decoding is a lookup, not arithmetic, on the hot path.
     private static readonly short[] DecodeTable = BuildDecodeTable();
 
@@ -61,6 +70,81 @@ public static class G711
             pcm[i * 2] = (byte)sample;
             pcm[(i * 2) + 1] = (byte)(sample >> 8);
         }
+    }
+
+    /// <summary>Compresses one signed 16-bit sample to a mu-law byte.</summary>
+    /// <remarks>
+    /// The inverse of <see cref="Decode(byte)"/>, and written out for the same reason. Only the SIP
+    /// harness needs it - a real call never encodes, because both legs are already PCMU and the relay
+    /// forwards payloads untouched - but a harness that synthesises its own test tone has to put it on
+    /// the wire somehow, and borrowing NAudio's encoder would leave the two halves of one codec written
+    /// in different styles from different sources.
+    ///
+    /// Three details worth spelling out. The input is shifted down to 14 bits because that is the
+    /// format's actual resolution: the bottom two bits of a 16-bit sample cannot be represented, and are
+    /// dropped rather than rounded. The result is complemented through <c>mask</c> rather than with
+    /// <c>~</c>, which folds the sign in at the same time - 0xFF flips every bit (leaving the sign bit
+    /// clear, meaning positive), 0x7F flips all but the top one.
+    ///
+    /// And the magnitude is taken <em>before</em> the shift, in an int, which is a deliberate departure
+    /// from the ITU reference's ordering. The reference shifts first, and an arithmetic shift of a
+    /// negative number rounds towards negative infinity rather than towards zero - so -31611 lands one
+    /// quantisation step away from where +31611 does, and near a segment boundary that is a different
+    /// output code. Doing it this way makes the encoding symmetric about zero and agrees with NAudio
+    /// everywhere; the int is also what keeps <c>short.MinValue</c> from wrapping when it is negated,
+    /// which is the one input where NAudio does not agree with itself (see G711Tests).
+    /// </remarks>
+    public static byte Encode(short sample)
+    {
+        var mask = sample < 0 ? 0x7F : 0xFF;
+        var magnitude = Math.Abs((int)sample) >> 2;
+
+        if (magnitude > Clip)
+        {
+            magnitude = Clip;
+        }
+
+        magnitude += Bias >> 2;
+
+        var segment = Segment(magnitude);
+
+        return segment >= SegmentCount
+            ? (byte)(0x7F ^ mask)
+            : (byte)(((segment << SegmentShift) | ((magnitude >> (segment + 1)) & MantissaMask)) ^ mask);
+    }
+
+    /// <summary>Compresses little-endian 16-bit PCM into <paramref name="encoded"/>, one byte per sample.</summary>
+    public static void Encode(ReadOnlySpan<byte> pcm, Span<byte> encoded)
+    {
+        var samples = pcm.Length / BytesPerSample;
+        if (encoded.Length < samples)
+        {
+            throw new ArgumentException(
+                $"Need {samples} bytes for {samples} samples but was given {encoded.Length}.",
+                nameof(encoded));
+        }
+
+        for (var i = 0; i < samples; i++)
+        {
+            encoded[i] = Encode((short)(pcm[i * 2] | (pcm[(i * 2) + 1] << 8)));
+        }
+    }
+
+    /// <summary>
+    /// Which of the eight exponent segments <paramref name="magnitude"/> falls in: the index of the first
+    /// segment whose top end it does not exceed, or <see cref="SegmentCount"/> when it exceeds them all.
+    /// The ends double each step (0x3F, 0x7F, 0xFF ...), which is the companding itself - each segment
+    /// spans twice the range of the one below with the same four bits of mantissa to describe it.
+    /// </summary>
+    private static int Segment(int magnitude)
+    {
+        var segment = 0;
+        for (var end = FirstSegmentEnd; segment < SegmentCount && magnitude > end; end = (end << 1) + 1)
+        {
+            segment++;
+        }
+
+        return segment;
     }
 
     private static short[] BuildDecodeTable()

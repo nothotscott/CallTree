@@ -72,6 +72,15 @@ public sealed record TelephonyStatusSnapshot
     public int ExpirySeconds { get; init; }
 
     public string? RtpPortRange { get; init; }
+
+    /// <summary>
+    /// True when the stack was started in loopback simulation mode (<c>Spoof:Enabled</c>): no trunk, no
+    /// registration, outbound legs dialled at the harness. Separate from
+    /// <see cref="RegistrationState"/> rather than a member of it, because "not registered" and "not
+    /// even trying, on purpose" are different answers to different questions and the enum is what the
+    /// UI colours a badge from.
+    /// </summary>
+    public bool Spoofing { get; init; }
 }
 
 /// <summary>Holds the current <see cref="TelephonyStatusSnapshot"/>. Singleton.</summary>
